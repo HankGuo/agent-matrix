@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
+const version = "0.2.0"
+
 //go:embed all:web
 var webFS embed.FS
 

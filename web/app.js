@@ -9,6 +9,7 @@ const dashView = $("#dashView");
 const topActions = $("#topActions");
 let refreshTimer = null;
 let useTokenLogin = false;
+let firstLoad = true;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -136,7 +137,28 @@ function fmtTime(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+function skeleton() {
+  const tbody = $("#agentRows");
+  tbody.replaceChildren();
+  for (let i = 0; i < 3; i++) {
+    const tr = document.createElement("tr");
+    tr.className = "sk-row";
+    for (let c = 0; c < 8; c++) {
+      const td = document.createElement("td");
+      const bar = document.createElement("div");
+      bar.className = "sk";
+      bar.style.width = (55 + ((i * 7 + c * 13) % 40)) + "%";
+      td.append(bar);
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+}
+
 async function loadAgents() {
+  if (firstLoad) {
+    skeleton();
+  }
   let data;
   try {
     const res = await api("/api/agents");
@@ -144,13 +166,21 @@ async function loadAgents() {
     data = await res.json();
   } catch {
     return;
+  } finally {
+    firstLoad = false;
   }
   const agents = data.agents || [];
   const online = agents.filter((a) => a.online).length;
   $("#statTotal").textContent = agents.length;
   $("#statOnline").textContent = online;
   $("#statOffline").textContent = agents.length - online;
+  $("#agentTable").hidden = agents.length === 0;
   $("#emptyTip").hidden = agents.length > 0;
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const tip = `更新于 ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())} · 每 15 秒自动刷新`;
+  $("#syncTip").textContent = tip;
+  $("#footSync").textContent = tip;
 
   const tbody = $("#agentRows");
   tbody.replaceChildren();
@@ -162,7 +192,7 @@ async function loadAgents() {
     dot.className = "dot " + (a.online ? "on" : "off");
     const st = document.createElement("span");
     st.className = "status-text " + (a.online ? "on" : "off");
-    st.textContent = a.online ? "在线" : "离线";
+    st.textContent = a.online ? " 在线" : " 离线";
     status.append(dot, st);
 
     const name = document.createElement("td");
@@ -185,7 +215,7 @@ async function loadAgents() {
 
     const ops = document.createElement("td");
     const del = document.createElement("button");
-    del.className = "btn small danger";
+    del.className = "btn danger";
     del.textContent = "删除";
     del.addEventListener("click", () => removeAgent(a));
     ops.append(del);
@@ -207,21 +237,31 @@ async function removeAgent(a) {
   if (res.ok) loadAgents();
 }
 
-/* ---- 接入新 Agent ---- */
+/* ---- 接入新 Agent（右侧滑出面板） ---- */
 
-const modal = $("#modal");
+const panel = $("#enrollPanel");
+const panelMask = $("#panelMask");
 
-$("#btnNew").addEventListener("click", () => {
-  modal.hidden = false;
+function openPanel() {
   $("#enrollForm").hidden = false;
   $("#enrollResult").hidden = true;
   $("#enrollLabel").value = "";
+  panel.classList.add("show");
+  panelMask.classList.add("show");
   $("#enrollLabel").focus();
-});
+}
 
-$("#btnClose").addEventListener("click", () => (modal.hidden = true));
-modal.addEventListener("click", (e) => {
-  if (e.target === modal) modal.hidden = true;
+function closePanel() {
+  panel.classList.remove("show");
+  panelMask.classList.remove("show");
+}
+
+$("#btnNew").addEventListener("click", openPanel);
+$("#btnNewEmpty").addEventListener("click", openPanel);
+$("#btnClose").addEventListener("click", closePanel);
+panelMask.addEventListener("click", closePanel);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closePanel();
 });
 
 $("#btnGen").addEventListener("click", async () => {
@@ -245,7 +285,6 @@ $("#btnCopy").addEventListener("click", async () => {
     await navigator.clipboard.writeText($("#promptText").textContent);
     btn.textContent = "已复制 ✓";
   } catch {
-    // 剪贴板 API 不可用时退化为选中
     const range = document.createRange();
     range.selectNodeContents($("#promptText"));
     const sel = window.getSelection();
@@ -267,6 +306,7 @@ async function boot() {
   } catch { /* 继续走状态探测 */ }
   try {
     const st = await (await fetch("/api/auth/status")).json();
+    if (st.version) $("#ver").textContent = "Agent Matrix v" + st.version;
     if (st.needs_setup) showSetup();
     else showLogin(st.env_login);
   } catch {

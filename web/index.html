@@ -3,90 +3,129 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Matrix</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Ccircle cx='11' cy='11' r='3' fill='%2334d399'/%3E%3Ccircle cx='21' cy='11' r='3' fill='%2338bdf8'/%3E%3Ccircle cx='16' cy='21' r='3' fill='%23a78bfa'/%3E%3C/svg%3E">
+<title>Agent Matrix · Agent 监控中心</title>
+<meta name="description" content="轻量 Agent 注册与在线状态监控中心：一句指令，Agent 自行接入。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231b1e22'/%3E%3Ccircle cx='12' cy='12' r='3' fill='%23f6f5f1'/%3E%3Ccircle cx='21' cy='12' r='3' fill='%23f6f5f1'/%3E%3Ccircle cx='16.5' cy='21' r='3' fill='%232e6b52'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+
 <header class="topbar">
   <div class="brand">
-    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="11" r="3.5" fill="#34d399"/><circle cx="21" cy="11" r="3.5" fill="#38bdf8"/><circle cx="16" cy="21" r="3.5" fill="#a78bfa"/><path d="M13 13.5 15 18M19 13.5 17 18M14.5 11h3" stroke="#3b4356" stroke-width="1.2"/></svg>
-    Agent Matrix
-    <span class="tag">Agent 监控中心</span>
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="8" fill="#1b1e22"/>
+      <circle cx="12" cy="12" r="3" fill="#f6f5f1"/>
+      <circle cx="21" cy="12" r="3" fill="#f6f5f1"/>
+      <circle cx="16.5" cy="21" r="3" fill="#2e6b52"/>
+      <path d="M14 14.2 15.4 18.4M19.4 14.2 17.9 18.4" stroke="#f6f5f1" stroke-width="1" opacity=".55"/>
+    </svg>
+    <span class="brand-name">Agent Matrix</span>
+    <span class="brand-sub">监控中心</span>
   </div>
   <div class="actions" id="topActions" hidden>
     <button class="btn primary" id="btnNew">接入新 Agent</button>
-    <button class="btn ghost" id="btnLogout">退出</button>
+    <button class="btn text" id="btnLogout">退出</button>
   </div>
 </header>
 
-<main>
-  <section id="setupView" class="center" hidden>
-    <form id="setupForm" class="card login-card">
-      <h1>初始化管理员账号</h1>
-      <p class="muted">首次访问，请设置账号和密码，作为后续登录凭证</p>
-      <input id="setupUser" placeholder="账号（2-32 位字母数字 _ . -）" autocomplete="username" maxlength="32" required>
-      <input type="password" id="setupPass" placeholder="密码（至少 8 位）" autocomplete="new-password" minlength="8" maxlength="128" required>
-      <input type="password" id="setupPass2" placeholder="确认密码" autocomplete="new-password" required>
+<main id="main">
+  <!-- 首次访问：初始化管理员账号 -->
+  <section id="setupView" class="auth-wrap" hidden>
+    <form id="setupForm" class="auth-card">
+      <h1 class="display">初始化管理员账号</h1>
+      <p class="muted">首次访问，请设置账号和密码。这将作为后续登录的唯一凭证。</p>
+      <label class="field"><span>账号</span>
+        <input id="setupUser" placeholder="2-32 位字母数字 _ . -" autocomplete="username" maxlength="32" required>
+      </label>
+      <label class="field"><span>密码</span>
+        <input type="password" id="setupPass" placeholder="至少 8 位" autocomplete="new-password" minlength="8" maxlength="128" required>
+      </label>
+      <label class="field"><span>确认密码</span>
+        <input type="password" id="setupPass2" placeholder="再输入一次" autocomplete="new-password" required>
+      </label>
       <button class="btn primary full" type="submit">创建并进入</button>
       <p class="error" id="setupError" hidden></p>
     </form>
   </section>
 
-  <section id="loginView" class="center" hidden>
-    <form id="loginForm" class="card login-card">
-      <h1>登录</h1>
+  <!-- 登录 -->
+  <section id="loginView" class="auth-wrap" hidden>
+    <form id="loginForm" class="auth-card">
+      <h1 class="display">登录</h1>
+      <p class="muted">使用初始化时设置的管理员账号。</p>
       <div id="accountFields">
-        <input id="loginUser" placeholder="账号" autocomplete="username">
-        <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password">
+        <label class="field"><span>账号</span><input id="loginUser" autocomplete="username"></label>
+        <label class="field"><span>密码</span><input type="password" id="loginPass" autocomplete="current-password"></label>
       </div>
       <div id="tokenField" hidden>
-        <input type="password" id="loginToken" placeholder="AGENT_MATRIX_ADMIN_TOKEN" autocomplete="off">
+        <label class="field"><span>应急令牌</span><input type="password" id="loginToken" placeholder="AGENT_MATRIX_ADMIN_TOKEN" autocomplete="off"></label>
       </div>
       <button class="btn primary full" type="submit">登 录</button>
-      <p class="toggle muted" id="loginToggle" hidden><a href="#" id="loginToggleLink">改用应急令牌登录</a></p>
+      <p class="toggle" id="loginToggle" hidden><a href="#" id="loginToggleLink">改用应急令牌登录</a></p>
       <p class="error" id="loginError" hidden></p>
     </form>
   </section>
 
+  <!-- 仪表盘 -->
   <section id="dashView" hidden>
-    <div class="stats">
-      <div class="card stat"><div class="num" id="statTotal">0</div><div class="label">Agent 总数</div></div>
-      <div class="card stat"><div class="num c-online" id="statOnline">0</div><div class="label">在线</div></div>
-      <div class="card stat"><div class="num c-offline" id="statOffline">0</div><div class="label">离线</div></div>
+    <div class="summary">
+      <p class="summary-line">
+        <strong id="statTotal">0</strong><span class="unit">台已纳管</span>
+        <span class="sep">·</span>
+        <span class="dot on" aria-hidden="true"></span><strong id="statOnline">0</strong><span class="unit">在线</span>
+        <span class="sep">·</span>
+        <span class="dot off" aria-hidden="true"></span><strong id="statOffline">0</strong><span class="unit">离线</span>
+      </p>
+      <p class="muted small" id="syncTip"></p>
     </div>
-    <div class="card table-card">
-      <table class="agents">
+
+    <div class="panel">
+      <table class="agents" id="agentTable">
         <thead>
-          <tr><th>状态</th><th>名称</th><th>主机</th><th>系统</th><th>IP</th><th>最后心跳</th><th>注册时间</th><th></th></tr>
+          <tr><th>状态</th><th>名称</th><th>主机</th><th>系统</th><th>IP</th><th>最后心跳</th><th>注册时间</th><th><span class="sr-only">操作</span></th></tr>
         </thead>
         <tbody id="agentRows"></tbody>
       </table>
-      <p class="empty muted" id="emptyTip" hidden>还没有 Agent 接入。点击右上角「接入新 Agent」，把生成的指令发给任意 Agent 执行即可。</p>
+
+      <div class="empty" id="emptyTip" hidden>
+        <h2 class="display-sm">从一段指令开始</h2>
+        <p class="muted">生成一段接入指令，发给你任意一台机器上的 Agent，它会自己完成注册并开始上报心跳。</p>
+        <ol class="steps">
+          <li><b>生成指令</b><span>点击右上角「接入新 Agent」，令牌 24 小时内有效</span></li>
+          <li><b>发给 Agent</b><span>原样粘贴到它的对话窗口，等待它汇报执行结果</span></li>
+          <li><b>回到这里</b><span>状态灯变绿，即接入完成</span></li>
+        </ol>
+        <button class="btn primary" id="btnNewEmpty">生成接入指令</button>
+      </div>
     </div>
   </section>
 </main>
 
-<div class="modal-mask" id="modal" hidden>
-  <div class="card modal">
+<footer class="footer">
+  <span id="ver">Agent Matrix</span>
+  <span id="footSync" class="muted"></span>
+</footer>
+
+<!-- 接入面板（右侧滑出） -->
+<div class="panel-mask" id="panelMask"></div>
+<aside class="slideover" id="enrollPanel" aria-label="接入新 Agent">
+  <header class="slideover-head">
     <h2>接入新 Agent</h2>
-    <div id="enrollForm">
-      <label class="muted" for="enrollLabel">为它起个名字（可选，如 cloud-a / openclaw-1）</label>
-      <div class="row">
-        <input id="enrollLabel" placeholder="agent 名称备注" maxlength="64">
-        <button class="btn primary" id="btnGen">生成接入指令</button>
-      </div>
-    </div>
-    <div id="enrollResult" hidden>
-      <p class="muted">把下面这段指令原样发给目标 Agent 执行。令牌 <b>24 小时内有效、只能成功使用一次</b>。</p>
-      <pre id="promptText"></pre>
-      <div class="row end">
-        <button class="btn primary" id="btnCopy">复制指令</button>
-        <button class="btn ghost" id="btnClose">关闭</button>
-      </div>
-    </div>
+    <button class="btn text" id="btnClose">关闭</button>
+  </header>
+  <div id="enrollForm">
+    <label class="field"><span>名称备注（可选）</span>
+      <input id="enrollLabel" placeholder="如 cloud-a / openclaw-1" maxlength="64">
+    </label>
+    <button class="btn primary full" id="btnGen">生成接入指令</button>
   </div>
-</div>
+  <div id="enrollResult" hidden>
+    <p class="muted small">把这段指令原样发给目标 Agent。令牌 <b>24 小时内有效、只能成功使用一次</b>。</p>
+    <pre id="promptText"></pre>
+    <button class="btn primary full" id="btnCopy">复制指令</button>
+  </div>
+</aside>
 
 <script src="/app.js"></script>
 </body>

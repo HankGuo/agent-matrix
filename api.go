@@ -83,7 +83,7 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "time": time.Now().Unix()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "time": time.Now().Unix(), "version": version})
 }
 
 // ---- 公开接口（Agent 侧） ----
@@ -183,6 +183,7 @@ func (s *server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"needs_setup": !has,
 		"env_login":   s.cfg.AdminToken != "",
+		"version":     version,
 	})
 }
 
