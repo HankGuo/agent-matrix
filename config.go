@@ -19,9 +19,9 @@ type config struct {
 
 func loadConfig() (*config, error) {
 	cfg := &config{
-		Addr:          envOr("AGENT_MATRIX_ADDR", ":8080"),
+		Addr:          envOr("AGENT_MATRIX_ADDR", ":26817"),
 		DBPath:        envOr("AGENT_MATRIX_DB", "./agent-matrix.db"),
-		BaseURL:       strings.TrimRight(envOr("AGENT_MATRIX_BASE_URL", "http://localhost:8080"), "/"),
+		BaseURL:       strings.TrimRight(envOr("AGENT_MATRIX_BASE_URL", "http://localhost:26817"), "/"),
 		AdminToken:    os.Getenv("AGENT_MATRIX_ADMIN_TOKEN"),
 		OnlineTimeout: 3 * time.Minute,
 	}
