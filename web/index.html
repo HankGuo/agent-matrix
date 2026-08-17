@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Matrix</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Ccircle cx='11' cy='11' r='3' fill='%2334d399'/%3E%3Ccircle cx='21' cy='11' r='3' fill='%2338bdf8'/%3E%3Ccircle cx='16' cy='21' r='3' fill='%23a78bfa'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="11" r="3.5" fill="#34d399"/><circle cx="21" cy="11" r="3.5" fill="#38bdf8"/><circle cx="16" cy="21" r="3.5" fill="#a78bfa"/><path d="M13 13.5 15 18M19 13.5 17 18M14.5 11h3" stroke="#3b4356" stroke-width="1.2"/></svg>
+    Agent Matrix
+    <span class="tag">Agent 监控中心</span>
+  </div>
+  <div class="actions" id="topActions" hidden>
+    <button class="btn primary" id="btnNew">接入新 Agent</button>
+    <button class="btn ghost" id="btnLogout">退出</button>
+  </div>
+</header>
+
+<main>
+  <section id="loginView" class="center" hidden>
+    <form id="loginForm" class="card login-card">
+      <h1>管理口令</h1>
+      <p class="muted">输入 <code>AGENT_MATRIX_ADMIN_TOKEN</code> 进入控制台</p>
+      <input type="password" id="loginToken" placeholder="••••••••" autocomplete="current-password" required>
+      <button class="btn primary full" type="submit">登 录</button>
+      <p class="error" id="loginError" hidden></p>
+    </form>
+  </section>
+
+  <section id="dashView" hidden>
+    <div class="stats">
+      <div class="card stat"><div class="num" id="statTotal">0</div><div class="label">Agent 总数</div></div>
+      <div class="card stat"><div class="num c-online" id="statOnline">0</div><div class="label">在线</div></div>
+      <div class="card stat"><div class="num c-offline" id="statOffline">0</div><div class="label">离线</div></div>
+    </div>
+    <div class="card table-card">
+      <table class="agents">
+        <thead>
+          <tr><th>状态</th><th>名称</th><th>主机</th><th>系统</th><th>IP</th><th>最后心跳</th><th>注册时间</th><th></th></tr>
+        </thead>
+        <tbody id="agentRows"></tbody>
+      </table>
+      <p class="empty muted" id="emptyTip" hidden>还没有 Agent 接入。点击右上角「接入新 Agent」，把生成的指令发给任意 Agent 执行即可。</p>
+    </div>
+  </section>
+</main>
+
+<div class="modal-mask" id="modal" hidden>
+  <div class="card modal">
+    <h2>接入新 Agent</h2>
+    <div id="enrollForm">
+      <label class="muted" for="enrollLabel">为它起个名字（可选，如 cloud-a / openclaw-1）</label>
+      <div class="row">
+        <input id="enrollLabel" placeholder="agent 名称备注" maxlength="64">
+        <button class="btn primary" id="btnGen">生成接入指令</button>
+      </div>
+    </div>
+    <div id="enrollResult" hidden>
+      <p class="muted">把下面这段指令原样发给目标 Agent 执行。令牌 <b>24 小时内有效、只能成功使用一次</b>。</p>
+      <pre id="promptText"></pre>
+      <div class="row end">
+        <button class="btn primary" id="btnCopy">复制指令</button>
+        <button class="btn ghost" id="btnClose">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
