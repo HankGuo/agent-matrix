@@ -24,7 +24,7 @@
     <span class="brand-sub">监控中心</span>
   </div>
   <div class="actions" id="topActions" hidden>
-    <button class="btn primary" id="btnNew">接入新 Agent</button>
+    <button class="btn primary" id="btnNew"><span class="txt-full">接入新 Agent</span><span class="txt-short">＋ 接入</span></button>
     <button class="btn text" id="btnSettings">设置</button>
     <button class="btn text" id="btnLogout">退出</button>
   </div>
@@ -86,12 +86,15 @@
     </div>
 
     <div class="panel">
-      <table class="agents" id="agentTable">
-        <thead>
-          <tr><th>状态</th><th>名称</th><th>主机</th><th>系统</th><th>IP</th><th>最后心跳</th><th>注册时间</th><th><span class="sr-only">操作</span></th></tr>
-        </thead>
-        <tbody id="agentRows"></tbody>
-      </table>
+      <div class="table-scroll">
+        <table class="agents" id="agentTable">
+          <thead>
+            <tr><th>状态</th><th>名称</th><th>主机</th><th>系统</th><th>IP</th><th>最后心跳</th><th class="col-created">注册时间</th><th><span class="sr-only">操作</span></th></tr>
+          </thead>
+          <tbody id="agentRows"></tbody>
+        </table>
+      </div>
+      <div class="cards" id="agentCards"></div>
 
       <div class="empty" id="emptyTip" hidden>
         <h2 class="display-sm">从一段指令开始</h2>

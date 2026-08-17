@@ -234,6 +234,8 @@ input:focus {
   box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
+.table-scroll { overflow-x: auto; }
+.cards { display: none; }
 .agents { width: 100%; border-collapse: collapse; }
 .agents th {
   text-align: left;
@@ -381,11 +383,56 @@ input:focus {
   user-select: text;
 }
 
-@media (max-width: 760px) {
-  main { padding: 28px 18px 56px; }
-  .topbar { padding: 14px 18px; }
-  .summary-line { font-size: 24px; }
-  .steps { grid-template-columns: 1fr; }
+/* 桌面默认显示完整按钮文案 */
+.txt-short { display: none; }
+
+/* 平板/小笔记本：表格保留全部交互，隐藏次要的「注册时间」列 */
+@media (max-width: 1024px) {
+  .agents .col-created { display: none; }
+}
+
+/* 手机/小屏：表格切换为卡片列表 */
+@media (max-width: 767px) {
+  main { padding: 24px 16px 56px; }
+  .topbar { padding: 12px 16px; flex-wrap: nowrap; gap: 8px; }
+  .brand { min-width: 0; gap: 7px; }
+  .brand-name { font-size: 17px; white-space: nowrap; }
+  .actions { flex: none; gap: 2px; }
+  .actions .btn { white-space: nowrap; padding: 8px 10px; }
   .brand-sub { display: none; }
-  .auth-wrap { padding-top: 6vh; }
+  .txt-full { display: none; }
+  .btn { padding: 8px 14px; }
+
+  .summary { margin-bottom: 18px; }
+  .summary-line { font-size: 21px; gap: 7px; }
+  .summary-line .unit { font-size: 12.5px; }
+
+  /* 表格 → 卡片 */
+  .table-scroll { display: none; }
+  .cards { display: grid; gap: 12px; padding: 14px; }
+  .acard {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    background: var(--surface);
+  }
+  .acard-head { display: flex; align-items: center; gap: 8px; }
+  .acard-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acard-id { color: var(--muted); font-size: 11.5px; margin: 4px 0 10px; }
+  .acard-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+  .acard-meta dt { color: var(--muted); font-size: 11.5px; letter-spacing: 0.04em; }
+  .acard-meta dd { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+  /* iOS 输入框小于 16px 会自动放大页面 */
+  input { font-size: 16px; }
+
+  .auth-wrap { padding-top: 5vh; }
+  .auth-card { padding: 28px 22px 26px; border-radius: 14px; }
+  .steps { grid-template-columns: 1fr; }
+  .empty { padding: 52px 20px 56px; }
+
+  .slideover { width: 100vw; border-left: none; }
+  .footer { flex-direction: column; gap: 4px; padding: 16px 18px 22px; }
+  .txt-full { display: none; }
+  .txt-short { display: inline; }
 }

@@ -143,7 +143,9 @@ function fmtTime(ts) {
 
 function skeleton() {
   const tbody = $("#agentRows");
+  const cards = $("#agentCards");
   tbody.replaceChildren();
+  cards.replaceChildren();
   for (let i = 0; i < 3; i++) {
     const tr = document.createElement("tr");
     tr.className = "sk-row";
@@ -156,6 +158,16 @@ function skeleton() {
       tr.append(td);
     }
     tbody.append(tr);
+    const card = document.createElement("div");
+    card.className = "acard";
+    const bar = document.createElement("div");
+    bar.className = "sk";
+    bar.style.width = "60%";
+    const bar2 = document.createElement("div");
+    bar2.className = "sk";
+    bar2.style.cssText = "width:90%;margin-top:10px";
+    card.append(bar, bar2);
+    cards.append(card);
   }
 }
 
@@ -178,8 +190,10 @@ async function loadAgents() {
   $("#statTotal").textContent = agents.length;
   $("#statOnline").textContent = online;
   $("#statOffline").textContent = agents.length - online;
-  $("#agentTable").hidden = agents.length === 0;
-  $("#emptyTip").hidden = agents.length > 0;
+  const hasAgents = agents.length > 0;
+  document.querySelector(".table-scroll").style.display = hasAgents ? "" : "none";
+  $("#agentCards").style.display = hasAgents ? "" : "none";
+  $("#emptyTip").hidden = hasAgents;
   const now = new Date();
   const p = (n) => String(n).padStart(2, "0");
   const tip = `更新于 ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())} · 每 15 秒自动刷新`;
@@ -187,7 +201,9 @@ async function loadAgents() {
   $("#footSync").textContent = tip;
 
   const tbody = $("#agentRows");
+  const cards = $("#agentCards");
   tbody.replaceChildren();
+  cards.replaceChildren();
   for (const a of agents) {
     const tr = document.createElement("tr");
 
@@ -215,7 +231,7 @@ async function loadAgents() {
     const seen = td(relTime(a.last_seen));
     seen.title = fmtTime(a.last_seen);
     const created = td(fmtTime(a.created_at));
-    created.className = "sub";
+    created.className = "sub col-created";
 
     const ops = document.createElement("td");
     const del = document.createElement("button");
@@ -226,7 +242,56 @@ async function loadAgents() {
 
     tr.append(status, name, host, os, ip, seen, created, ops);
     tbody.append(tr);
+    cards.append(agentCard(a));
   }
+}
+
+/* 移动端卡片视图 */
+function agentCard(a) {
+  const card = document.createElement("div");
+  card.className = "acard";
+
+  const head = document.createElement("div");
+  head.className = "acard-head";
+  const dot = document.createElement("span");
+  dot.className = "dot " + (a.online ? "on" : "off");
+  const st = document.createElement("span");
+  st.className = "status-text " + (a.online ? "on" : "off");
+  st.textContent = a.online ? "在线" : "离线";
+  const nm = document.createElement("span");
+  nm.className = "acard-name";
+  nm.textContent = a.name;
+  const del = document.createElement("button");
+  del.className = "btn danger";
+  del.textContent = "删除";
+  del.addEventListener("click", () => removeAgent(a));
+  head.append(dot, st, nm, del);
+
+  const idLine = document.createElement("div");
+  idLine.className = "acard-id mono";
+  idLine.textContent = a.id;
+
+  const meta = document.createElement("dl");
+  meta.className = "acard-meta";
+  const fields = [
+    ["主机", a.hostname || "-"],
+    ["系统", a.os ? `${a.os}/${a.arch || "?"}` : "-"],
+    ["IP", a.ip || "-"],
+    ["最后心跳", relTime(a.last_seen)],
+    ["注册时间", fmtTime(a.created_at)],
+  ];
+  for (const [k, v] of fields) {
+    const wrap = document.createElement("div");
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    wrap.append(dt, dd);
+    meta.append(wrap);
+  }
+
+  card.append(head, idLine, meta);
+  return card;
 }
 
 function td(text) {
