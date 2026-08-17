@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.3.1"
+const version = "0.4.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -42,32 +42,13 @@ func main() {
 		cfg:        cfg,
 		store:      store,
 		rl:         newRateLimiter(10, time.Minute),
+		pullRl:     newRateLimiter(60, time.Minute),
 		sessionKey: sessionKey,
 	}
 
-	static, err := fs.Sub(webFS, "web")
-	if err != nil {
-		log.Fatalf("嵌入资源错误: %v", err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("POST /api/register", s.handleRegister)
-	mux.HandleFunc("POST /api/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
-	mux.HandleFunc("POST /api/setup", s.handleSetup)
-	mux.HandleFunc("POST /api/login", s.handleLogin)
-	mux.HandleFunc("POST /api/logout", s.handleLogout)
-	mux.HandleFunc("GET /api/agents", s.requireAdmin(s.handleListAgents))
-	mux.HandleFunc("DELETE /api/agents/{id}", s.requireAdmin(s.handleDeleteAgent))
-	mux.HandleFunc("POST /api/enrollments", s.requireAdmin(s.handleCreateEnrollment))
-	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.handleGetSettings))
-	mux.HandleFunc("POST /api/settings", s.requireAdmin(s.handleUpdateSettings))
-	mux.Handle("GET /", http.FileServerFS(static))
-
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           securityHeaders(mux),
+		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -90,4 +71,38 @@ func main() {
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		log.Printf("关闭异常: %v", err)
 	}
+}
+
+// routes 注册全部路由并套上安全响应头，单独成方法便于测试复用。
+func (s *server) routes() http.Handler {
+	static, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatalf("嵌入资源错误: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("POST /api/register", s.handleRegister)
+	mux.HandleFunc("POST /api/heartbeat", s.handleHeartbeat)
+	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/setup", s.handleSetup)
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", s.handleLogout)
+	mux.HandleFunc("GET /api/agents", s.requireAdmin(s.handleListAgents))
+	mux.HandleFunc("DELETE /api/agents/{id}", s.requireAdmin(s.handleDeleteAgent))
+	mux.HandleFunc("POST /api/enrollments", s.requireAdmin(s.handleCreateEnrollment))
+	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.handleGetSettings))
+	mux.HandleFunc("POST /api/settings", s.requireAdmin(s.handleUpdateSettings))
+	// Agent 侧任务接口（Bearer amh_ 令牌）
+	mux.HandleFunc("GET /api/agent/tasks", s.handlePullTasks)
+	mux.HandleFunc("POST /api/agent/tasks/{id}/result", s.handleWriteResult)
+	// 管理端任务接口
+	mux.HandleFunc("POST /api/tasks", s.requireAdmin(s.handleCreateTask))
+	mux.HandleFunc("GET /api/tasks", s.requireAdmin(s.handleListTasks))
+	mux.HandleFunc("GET /api/tasks/{id}", s.requireAdmin(s.handleTaskDetail))
+	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.requireAdmin(s.handleCancelTask))
+	mux.HandleFunc("POST /api/assignments/{id}/requeue", s.requireAdmin(s.handleRequeueAssignment))
+	mux.HandleFunc("GET /api/taskloop-prompt", s.requireAdmin(s.handleTaskLoopPrompt))
+	mux.Handle("GET /", http.FileServerFS(static))
+	return securityHeaders(mux)
 }

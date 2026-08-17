@@ -2,7 +2,7 @@
 
 [中文文档](README.md)
 
-A lightweight **agent registry & online-status monitor**. The core idea: no daemon to install on every machine — generate a **one-shot onboarding prompt** in the WebUI and hand it to any agent with shell access (Claude Code, Kimi CLI, Codex, OpenClaw, Hermes…). The agent registers itself, persists its config, and installs a scheduled heartbeat job. You watch every agent's live status in the WebUI.
+A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **one-shot onboarding prompt** in the WebUI and hand it to any agent with shell access (Claude Code, Kimi CLI, Codex, OpenClaw, Hermes…). The agent registers itself, persists its config, and installs a scheduled heartbeat job. You watch every agent's live status in the WebUI, and you can @ one or more agents with a plain-text task: the agent pulls it on its own using the heartbeat credential, executes it in whatever channel it has (OpenClaw / Hermes / local tools), and writes the result back.
 
 Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
 
@@ -30,11 +30,12 @@ flowchart LR
     G1 -->|"POST /api/heartbeat (every minute)"| S
     G2 -->|"POST /api/heartbeat (every minute)"| S
     G3 -->|"POST /api/heartbeat (every minute)"| S
+    G1 -.->|"GET /api/agent/tasks pull task<br/>POST …/result write back"| S
     B -.->|"① copy onboarding prompt (one-time token)"| P[" "]
     P -.->|"② paste to the target agent"| G1
 ```
 
-Key point: between the server and agent machines there is **only the agent-initiated outbound heartbeat** — no inbound connectivity required. The onboarding prompt travels out-of-band via the admin's clipboard; nothing needs to be preinstalled on the agent side.
+Key point: between the server and agent machines there are **only agent-initiated outbound requests** (heartbeat / task pull / result write-back) — no inbound connectivity required. The onboarding prompt travels out-of-band via the admin's clipboard; nothing needs to be preinstalled on the agent side.
 
 ## Onboarding flow
 
@@ -75,6 +76,55 @@ sequenceDiagram
     A->>S: GET /api/agents (WebUI polls every 15s)
     S-->>A: online status (last heartbeat ≤ 3 min ⇒ online)
 ```
+
+## Task dispatch (plain text)
+
+The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents. Each agent **pulls its own tasks every minute** reusing the heartbeat credential, executes autonomously in its own channel (OpenClaw / Hermes / local tools), and writes the result back. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
+
+### Assignment state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: task created, agent @-mentioned
+    pending --> delivered: agent pulls (atomic lock in a transaction, never delivered twice)
+    delivered --> done: result written back (success)
+    delivered --> failed: result written back (failure)
+    delivered --> pending: manual requeue by admin (when suspected stuck)
+    pending --> canceled: task canceled by admin
+    delivered --> canceled: task canceled / agent deleted
+    done --> [*]
+    failed --> [*]
+    canceled --> [*]
+```
+
+Rules:
+
+- **Pull means delivered**: `GET /api/agent/tasks` flips pending → delivered inside a transaction, so a task is never pulled twice
+- **Write-back is single-shot**: only a delivered assignment accepts a result, exactly once; repeats get 409
+- **No automatic timeout requeue**: autonomous agents have unpredictable runtimes; auto-requeue would cause duplicate execution. A delivered assignment with no result after 10 minutes is flagged "疑似卡住" (possibly stuck) in the UI for a human to requeue manually
+- Overall task status is aggregated live from its assignments: pending / running / done / partial / failed / canceled
+- Deleting an agent marks its unfinished assignments canceled; history is kept
+
+### Task sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Admin (browser)
+    participant S as Agent Matrix Server
+    participant G as Agent (autonomous)
+
+    A->>S: POST /api/tasks (title + content + @ 1~20 agents)
+    loop every minute (same script as heartbeat)
+        G->>S: GET /api/agent/tasks (Bearer amh_…)
+        S-->>G: its tasks (atomically marked delivered)
+    end
+    G->>G: executes content autonomously (OpenClaw / Hermes / local tools)
+    G->>S: POST /api/agent/tasks/{assignment_id}/result (done/failed + result text)
+    A->>S: GET /api/tasks (WebUI polls status & results every 15s)
+```
+
+> Agents enrolled before v0.4 lack the task loop: generate the **supplementary prompt** under WebUI "设置" (Settings) and send it to them — **no re-registration needed** (it contains no secrets; credentials are read from the agent's local `~/.agent-matrix/config`).
 
 ## Sample onboarding prompt
 
@@ -122,13 +172,31 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 - macOS：创建 ~/Library/LaunchAgents/com.agent-matrix.heartbeat.plist（ProgramArguments 指向脚本，StartInterval 为 60），然后 launchctl load 该 plist
 - Windows：写 heartbeat.ps1（用 Invoke-RestMethod 做同样的 POST），再 schtasks /create /tn "AgentMatrixHeartbeat" /sc minute /mo 1 /tr 指向它
 
-## 步骤 5：验证
+## 步骤 5：任务接收循环（接收平台派发的任务）
+平台管理员会向你派发任务。把「拉取」并入每分钟执行的心跳脚本，把「执行」留给你自己的主循环——任务耗时不可预估，绝不要在定时脚本里同步执行。
+
+在 heartbeat.sh 的心跳命令之后追加：
+
+    resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null || true)
+    case "$resp" in *'"assignment_id"'*) printf '%s\n' "$resp" >> "$HOME/.agent-matrix/inbox.jsonl";; esac
+
+在你的主循环里消费 $HOME/.agent-matrix/inbox.jsonl：每行 JSON 的 tasks 数组含若干 {"assignment_id":"tsa_...","title":"...","content":"..."}。content 就是平台管理员发给你的指令本身，按你的能力执行它（可以调用 OpenClaw / Hermes / 本地工具，也可以直接处理），完成后写回结果并把这行从 inbox 移除：
+
+    curl -fsS -m 30 -X POST "$AM_URL/api/agent/tasks/<assignment_id>/result" \
+      -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
+      -d '{"status":"done","result":"<执行结果摘要，纯文本，≤32KB>"}'
+
+失败则 status 用 "failed" 并在 result 写明原因。规则：每个 assignment_id 只能成功写回一次；任务一经拉取即锁定给你，重复拉取不会重复返回；写回前必须已拉取。
+
+## 步骤 6：验证
 1. 手动执行一次 $HOME/.agent-matrix/heartbeat.sh（无输出即正常）。
 2. 再手动调一次心跳接口确认返回包含 "ok":true：
     . "$HOME/.agent-matrix/config" && curl -fsS -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN"
-3. 确认定时任务已存在（crontab -l / launchctl list / systemctl --user list-timers / schtasks /query 之一，按你的平台）。
+3. 手动调一次任务拉取接口确认返回 JSON（没有任务时 tasks 为空数组）：
+    . "$HOME/.agent-matrix/config" && curl -fsS "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN"
+4. 确认定时任务已存在（crontab -l / launchctl list / systemctl --user list-timers / schtasks /query 之一，按你的平台）。
 
-## 步骤 6：向我汇报
+## 步骤 7：向我汇报
 告诉我：注册是否成功、使用了哪种定时任务、验证结果。若任何一步失败，重试一次；仍失败则报告失败步骤和原始报错，不要静默跳过。
 ```
 
@@ -137,9 +205,10 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 ## Features
 
 - **Prompt-as-installer**: the onboarding prompt is idempotent and self-verifying; the agent reports back its result
+- **Plain-text task dispatch**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot, stuck assignments can be manually requeued
 - **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
 - **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
-- **Pure WebUI**: the control machine needs nothing but a browser; status dots auto-refresh every 15s
+- **Pure WebUI**: the control machine needs nothing but a browser; status dots and task progress auto-refresh every 15s
 - **Cross-platform heartbeat**: the prompt covers Linux (cron / systemd user timer), macOS (launchd), and Windows (schtasks)
 - **Reliable deployment**: one static binary + one SQLite file under systemd; graceful shutdown, rate limiting, and security headers built in
 
@@ -205,6 +274,8 @@ WantedBy=multi-user.target
 2. **Paste the prompt verbatim to the target agent** (into its chat/CLI)
 3. The agent reports back: registration result, scheduler type, verification
 4. Back in the WebUI, a green dot means it's online
+5. Switch to the "任务" (Tasks) tab → new task → write title & content, tick one or more agents → create
+6. The agent pulls the task within a minute and executes autonomously; open "详情" (Detail) to see each agent's status and full result
 
 > Note: the target agent must be able to **run shell commands and create scheduled jobs**. A chat-only agent (e.g. some vendor-hosted IM bots) cannot onboard itself — that's a mechanical constraint, not a configuration issue.
 
@@ -214,18 +285,25 @@ WantedBy=multi-user.target
 |---|---|---|---|
 | `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token |
 | `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (optional `meta` JSON) |
+| `GET` | `/api/agent/tasks` | `Bearer amh_…` | Pull own pending tasks (atomically marked delivered, never twice) |
+| `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | Write back result (`status`: done/failed + `result` ≤32KB, delivered-only, single-shot) |
 | `GET` | `/api/auth/status` | none | Whether setup is needed / emergency token enabled |
 | `POST` | `/api/setup` | only before setup | Create the admin account on first visit |
 | `POST` | `/api/login` | username+password / emergency token | WebUI login, sets session cookie |
 | `GET` | `/api/agents` | session cookie | Agent list with online status |
 | `POST` | `/api/enrollments` | session cookie | Issue one-time token + onboarding prompt |
 | `GET` / `POST` | `/api/settings` | session cookie | Read / update the platform base URL |
-| `DELETE` | `/api/agents/{id}` | session cookie | Delete agent |
+| `DELETE` | `/api/agents/{id}` | session cookie | Delete agent (its unfinished assignments become canceled) |
+| `POST` | `/api/tasks` | session cookie | Create a task @ 1-20 agents (title ≤120 chars, content ≤16KB) |
+| `GET` | `/api/tasks`, `/api/tasks/{id}` | session cookie | Task list / detail (detail includes full results) |
+| `POST` | `/api/tasks/{id}/cancel` | session cookie | Cancel task (unfinished assignments become canceled) |
+| `POST` | `/api/assignments/{id}/requeue` | session cookie | Reset a suspected-stuck delivered assignment to pending |
+| `GET` | `/api/taskloop-prompt` | session cookie | Supplementary task-loop prompt for pre-v0.4 agents (no secrets) |
 | `GET` | `/healthz` | none | Health check |
 
 ## Scope
 
-Agent Matrix is a **registry + presence monitor only** — no task dispatch. It complements task-orchestration platforms (e.g. Multica): Matrix answers "who's alive", an orchestrator answers "who's doing what".
+Agent Matrix covers **registry + presence + plain-text task delivery**. The task model is deliberately simple: one dispatch, one execution, one write-back — no DAG orchestration, no automatic retries, no attachments yet (next phase). For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence, collect the result"; the orchestrator answers "multi-step pipelines".
 
 ## License
 

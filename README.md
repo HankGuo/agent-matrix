@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-轻量的 **Agent 注册与在线状态监控中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段接入指令（提示词）**，把它发给任意具备 shell 执行能力的 Agent（Claude Code / Kimi CLI / Codex / OpenClaw / Hermes……），Agent 会自己完成注册、落盘配置、安装定时心跳任务。你在 WebUI 里实时看到所有 Agent 的在线状态。
+轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段接入指令（提示词）**，把它发给任意具备 shell 执行能力的 Agent（Claude Code / Kimi CLI / Codex / OpenClaw / Hermes……），Agent 会自己完成注册、落盘配置、安装定时心跳任务。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发纯文本任务：Agent 复用心跳凭证自行拉取、在自己的通道里执行（OpenClaw / Hermes / 本地工具皆可），再把结果写回。
 
 单二进制 + 嵌入式 SQLite + 内嵌 WebUI，**零外部运行时依赖**。
 
@@ -30,11 +30,12 @@ flowchart LR
     G1 -->|"POST /api/heartbeat（每分钟）"| S
     G2 -->|"POST /api/heartbeat（每分钟）"| S
     G3 -->|"POST /api/heartbeat（每分钟）"| S
+    G1 -.->|"GET /api/agent/tasks 拉取任务<br/>POST …/result 写回结果"| S
     B -.->|"① 复制接入指令（带一次性令牌）"| P[" "]
     P -.->|"② 粘贴给目标 Agent 执行"| G1
 ```
 
-关键点：Server 与 Agent 机器之间**只有 Agent 主动外拨的心跳**（POST），没有任何入站连接要求；接入指令经管理员剪贴板带外传递，不依赖 Agent 侧预装任何组件。
+关键点：Server 与 Agent 机器之间**只有 Agent 主动外拨的请求**（心跳 / 拉任务 / 写回结果，全是出站 POST/GET），没有任何入站连接要求；接入指令经管理员剪贴板带外传递，不依赖 Agent 侧预装任何组件。
 
 ## 接入流程
 
@@ -75,6 +76,55 @@ sequenceDiagram
     A->>S: GET /api/agents（WebUI 每 15s 轮询）
     S-->>A: 在线状态（最后心跳 ≤ 3 分钟判定在线）
 ```
+
+## 任务派发（纯文本）
+
+管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent。Agent 复用心跳凭证**每分钟自行拉取**任务，在自己的通道里自治执行（OpenClaw / Hermes / 本地工具皆可），再把结果写回。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
+
+### 指派状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: 创建任务并 @ Agent
+    pending --> delivered: Agent 拉取（事务内原子锁定，不重复投递）
+    delivered --> done: 回写成功结果
+    delivered --> failed: 回写失败原因
+    delivered --> pending: 疑似卡住，管理员手动「重新投递」
+    pending --> canceled: 管理员取消任务
+    delivered --> canceled: 管理员取消任务 / 删除 Agent
+    done --> [*]
+    failed --> [*]
+    canceled --> [*]
+```
+
+规则：
+
+- **拉取即投递**：`GET /api/agent/tasks` 在事务内把 pending 置为 delivered，同一任务不会被拉两次
+- **回写一次性**：仅 delivered 状态的指派可以写回结果，且只能成功写一次；重复写回返回 409
+- **不做自动超时重派**：自治 Agent 的执行时长不可预估，自动重派会导致重复执行。delivered 超过 10 分钟无结果会在详情页标记「疑似卡住」，由管理员手动「重新投递」
+- 任务整体状态由指派实时聚合：待执行 / 执行中 / 已完成 / 部分失败 / 失败 / 已取消
+- 删除 Agent 时，其未结束的指派自动置为 canceled，历史保留
+
+### 任务时序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as 管理员（浏览器）
+    participant S as Agent Matrix Server
+    participant G as Agent（自治执行）
+
+    A->>S: POST /api/tasks（标题 + 内容 + @ 1~20 个 Agent）
+    loop 每分钟（与心跳同一脚本）
+        G->>S: GET /api/agent/tasks（Bearer amh_…）
+        S-->>G: 属于它的任务（原子置 delivered）
+    end
+    G->>G: content 作为指令自治执行（OpenClaw / Hermes / 本地工具）
+    G->>S: POST /api/agent/tasks/{assignment_id}/result（done/failed + 结果文本）
+    A->>S: GET /api/tasks（WebUI 每 15s 轮询状态与结果）
+```
+
+> v0.4 之前接入的老 Agent 没有任务接收循环：在 WebUI「设置」里点「生成补充指令」，把指令发给它即可补齐，**不需要重新注册**（指令不含密钥，凭证从它本机 `~/.agent-matrix/config` 读取）。
 
 ## 接入指令示例
 
@@ -122,13 +172,31 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 - macOS：创建 ~/Library/LaunchAgents/com.agent-matrix.heartbeat.plist（ProgramArguments 指向脚本，StartInterval 为 60），然后 launchctl load 该 plist
 - Windows：写 heartbeat.ps1（用 Invoke-RestMethod 做同样的 POST），再 schtasks /create /tn "AgentMatrixHeartbeat" /sc minute /mo 1 /tr 指向它
 
-## 步骤 5：验证
+## 步骤 5：任务接收循环（接收平台派发的任务）
+平台管理员会向你派发任务。把「拉取」并入每分钟执行的心跳脚本，把「执行」留给你自己的主循环——任务耗时不可预估，绝不要在定时脚本里同步执行。
+
+在 heartbeat.sh 的心跳命令之后追加：
+
+    resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null || true)
+    case "$resp" in *'"assignment_id"'*) printf '%s\n' "$resp" >> "$HOME/.agent-matrix/inbox.jsonl";; esac
+
+在你的主循环里消费 $HOME/.agent-matrix/inbox.jsonl：每行 JSON 的 tasks 数组含若干 {"assignment_id":"tsa_...","title":"...","content":"..."}。content 就是平台管理员发给你的指令本身，按你的能力执行它（可以调用 OpenClaw / Hermes / 本地工具，也可以直接处理），完成后写回结果并把这行从 inbox 移除：
+
+    curl -fsS -m 30 -X POST "$AM_URL/api/agent/tasks/<assignment_id>/result" \
+      -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
+      -d '{"status":"done","result":"<执行结果摘要，纯文本，≤32KB>"}'
+
+失败则 status 用 "failed" 并在 result 写明原因。规则：每个 assignment_id 只能成功写回一次；任务一经拉取即锁定给你，重复拉取不会重复返回；写回前必须已拉取。
+
+## 步骤 6：验证
 1. 手动执行一次 $HOME/.agent-matrix/heartbeat.sh（无输出即正常）。
 2. 再手动调一次心跳接口确认返回包含 "ok":true：
     . "$HOME/.agent-matrix/config" && curl -fsS -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN"
-3. 确认定时任务已存在（crontab -l / launchctl list / systemctl --user list-timers / schtasks /query 之一，按你的平台）。
+3. 手动调一次任务拉取接口确认返回 JSON（没有任务时 tasks 为空数组）：
+    . "$HOME/.agent-matrix/config" && curl -fsS "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN"
+4. 确认定时任务已存在（crontab -l / launchctl list / systemctl --user list-timers / schtasks /query 之一，按你的平台）。
 
-## 步骤 6：向我汇报
+## 步骤 7：向我汇报
 告诉我：注册是否成功、使用了哪种定时任务、验证结果。若任何一步失败，重试一次；仍失败则报告失败步骤和原始报错，不要静默跳过。
 ```
 
@@ -137,9 +205,10 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 ## 特性
 
 - **提示词即安装器**：接入指令自带幂等校验与自检步骤，Agent 执行完会主动汇报结果
+- **纯文本任务派发**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；卡住的指派可手动重新投递
 - **首次访问强制初始化**：无任何账号时 WebUI 只开放初始化页，密码 PBKDF2-SHA256 加盐存储
 - **一次性注册令牌**：24 小时有效、只用一次；注册后换发独立心跳令牌，数据库只存哈希
-- **纯 WebUI**：管理端只需要浏览器；15 秒自动刷新状态灯
+- **纯 WebUI**：管理端只需要浏览器；15 秒自动刷新状态灯与任务进度
 - **跨平台心跳**：指令覆盖 Linux（cron / systemd user timer）、macOS（launchd）、Windows（schtasks）
 - **可靠部署**：一个静态二进制 + 一个 SQLite 文件，systemd 拉起即可；内建优雅退出、限流、安全响应头
 
@@ -205,6 +274,8 @@ WantedBy=multi-user.target
 2. 把指令**原样发给目标 Agent**（在它的对话窗口里粘贴即可）
 3. Agent 执行完会汇报「注册成功、定时任务类型、验证结果」
 4. 回到 WebUI，状态灯变绿即接入完成
+5. 切到「任务」页 → 新建任务 → 写标题和内容、勾选一个或多个 Agent → 创建
+6. Agent 一分钟内自行拉到任务并自治执行，结果写回；点「详情」可看每个 Agent 的状态与结果全文
 
 > 注意：目标 Agent 必须具备**执行 shell 命令和创建定时任务**的能力。只能对话、无法执行命令的 Agent（例如某些厂商托管的 IM 机器人）无法自行接入——这是机制决定的，不是配置问题。
 
@@ -214,18 +285,25 @@ WantedBy=multi-user.target
 |---|---|---|---|
 | `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌 |
 | `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（可选携带 `meta` JSON） |
+| `GET` | `/api/agent/tasks` | `Bearer amh_…` | Agent 拉取自己的待执行任务（事务内原子置 delivered，不重复投递） |
+| `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | 回写执行结果（`status`: done/failed + `result` ≤32KB，仅 delivered 状态可写一次） |
 | `GET` | `/api/auth/status` | 无 | 查询是否需要初始化、是否启用应急令牌 |
 | `POST` | `/api/setup` | 仅未初始化时可用 | 首次访问创建管理员账号 |
 | `POST` | `/api/login` | 账号密码 / 应急令牌 | WebUI 登录，种会话 Cookie |
 | `GET` | `/api/agents` | 会话 Cookie | Agent 列表（含在线状态） |
 | `POST` | `/api/enrollments` | 会话 Cookie | 生成一次性令牌 + 接入指令 |
 | `GET` / `POST` | `/api/settings` | 会话 Cookie | 读取 / 修改平台地址 |
-| `DELETE` | `/api/agents/{id}` | 会话 Cookie | 删除 Agent |
+| `DELETE` | `/api/agents/{id}` | 会话 Cookie | 删除 Agent（其未结束指派自动置 canceled） |
+| `POST` | `/api/tasks` | 会话 Cookie | 创建任务并 @ 1-20 个 Agent（标题 ≤120 字，内容 ≤16KB） |
+| `GET` | `/api/tasks`、`/api/tasks/{id}` | 会话 Cookie | 任务列表 / 详情（详情含各指派结果全文） |
+| `POST` | `/api/tasks/{id}/cancel` | 会话 Cookie | 取消任务（未结束指派全部置 canceled） |
+| `POST` | `/api/assignments/{id}/requeue` | 会话 Cookie | 把疑似卡住的 delivered 指派重置回 pending |
+| `GET` | `/api/taskloop-prompt` | 会话 Cookie | 生成老 Agent 的任务能力补充指令（不含密钥） |
 | `GET` | `/healthz` | 无 | 健康检查 |
 
 ## 定位与边界
 
-Agent Matrix 只做**注册表 + 在线状态监控**，不做任务派发。需要派发/编排时可以与任务平台（如 Multica）共存：Matrix 回答「谁活着」，派单平台回答「谁在干活」。
+Agent Matrix 做**注册表 + 在线状态 + 纯文本任务直达**。任务模型刻意简单：一次派发、一次执行、一次回写——没有 DAG 编排、没有自动重试、暂不支持附件（下一阶段）。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话送到、把结果收回来」，编排平台负责「多步流程」。
 
 ## License
 

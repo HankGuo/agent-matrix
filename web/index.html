@@ -74,6 +74,12 @@
 
   <!-- 仪表盘 -->
   <section id="dashView" hidden>
+    <nav class="tabs" id="dashTabs" aria-label="视图切换">
+      <button class="tab active" data-view="agents" type="button">Agent</button>
+      <button class="tab" data-view="tasks" type="button">任务</button>
+    </nav>
+
+    <div id="agentsView">
     <div class="summary">
       <p class="summary-line">
         <strong id="statTotal">0</strong><span class="unit">台已纳管</span>
@@ -105,6 +111,32 @@
           <li><b>回到这里</b><span>状态灯变绿，即接入完成</span></li>
         </ol>
         <button class="btn primary" id="btnNewEmpty">生成接入指令</button>
+      </div>
+    </div>
+    </div>
+
+    <!-- 任务视图 -->
+    <div id="tasksView" hidden>
+      <div class="taskhead">
+        <p class="muted small" id="taskStat"></p>
+        <button class="btn primary" id="btnNewTask"><span class="txt-full">新建任务</span><span class="txt-short">＋ 任务</span></button>
+      </div>
+      <div class="panel">
+        <div class="table-scroll" id="taskTableWrap">
+          <table class="agents" id="taskTable">
+            <thead>
+              <tr><th>状态</th><th>标题</th><th>指派给</th><th class="col-created">创建时间</th><th><span class="sr-only">操作</span></th></tr>
+            </thead>
+            <tbody id="taskRows"></tbody>
+          </table>
+        </div>
+        <div class="cards" id="taskCards"></div>
+
+        <div class="empty" id="taskEmpty" hidden>
+          <h2 class="display-sm">派发你的第一个任务</h2>
+          <p class="muted">写下任务内容，@ 一个或多个已接入的 Agent。它们会在一分钟内拉取到任务，执行完毕后把结果写回这里。</p>
+          <button class="btn primary" id="btnNewTaskEmpty">新建任务</button>
+        </div>
       </div>
     </div>
   </section>
@@ -148,7 +180,48 @@
   <button class="btn primary full" id="btnSaveSettings">保存</button>
   <p class="ok" id="settingsSaved" hidden>已保存</p>
   <div class="divider"></div>
+  <h3 class="subhead">老 Agent 补充任务能力</h3>
+  <p class="hint">v0.4 之前接入的 Agent 没有任务接收循环。生成下面这段指令发给它即可补齐，不需要重新注册。</p>
+  <button class="btn text" id="btnTaskLoop">生成补充指令</button>
+  <div id="taskLoopBox" hidden>
+    <pre id="taskLoopText"></pre>
+    <button class="btn primary full" id="btnCopyTaskLoop">复制指令</button>
+  </div>
+  <div class="divider"></div>
   <p class="muted small" id="settingsVer"></p>
+</aside>
+
+<!-- 新建任务（右侧滑出） -->
+<aside class="slideover" id="taskNewPanel" aria-label="新建任务">
+  <header class="slideover-head">
+    <h2>新建任务</h2>
+    <button class="btn text" id="btnTaskNewClose">关闭</button>
+  </header>
+  <label class="field"><span>标题</span>
+    <input id="taskTitle" placeholder="一句话概括任务" maxlength="120">
+  </label>
+  <label class="field"><span>任务内容</span>
+    <textarea id="taskContent" rows="8" placeholder="写给 Agent 的完整指令。它会原样收到这段文本，执行后把结果写回。"></textarea>
+  </label>
+  <div class="field"><span>指派给（可多选，离线的上线后也会收到）</span>
+    <div class="picker" id="agentPicker"></div>
+  </div>
+  <button class="btn primary full" id="btnCreateTask">创建任务</button>
+  <p class="error" id="taskNewError" hidden></p>
+</aside>
+
+<!-- 任务详情（右侧滑出） -->
+<aside class="slideover" id="taskDetailPanel" aria-label="任务详情">
+  <header class="slideover-head">
+    <h2 id="tdTitle">任务详情</h2>
+    <button class="btn text" id="btnTdClose">关闭</button>
+  </header>
+  <p class="task-meta" id="tdMeta"><span id="tdStatus"></span><span class="muted small" id="tdTime"></span></p>
+  <div class="result-block" id="tdContent"></div>
+  <div class="divider"></div>
+  <h3 class="subhead">执行情况</h3>
+  <div id="tdAssigns"></div>
+  <button class="btn danger full" id="btnCancelTask" hidden>取消任务</button>
 </aside>
 
 <script src="/app.js"></script>

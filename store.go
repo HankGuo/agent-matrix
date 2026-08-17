@@ -72,6 +72,26 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tasks (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    canceled_at INTEGER
+);
+-- 指派：一个任务 @ 多个 Agent，每个 Agent 一条，状态独立流转。
+-- agent_id 不建外键：Agent 删除后指派保留为历史（状态置 canceled）。
+CREATE TABLE IF NOT EXISTS task_assignments (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    agent_id     TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    delivered_at INTEGER,
+    result       TEXT NOT NULL DEFAULT '',
+    result_at    INTEGER,
+    UNIQUE(task_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_assign_agent ON task_assignments(agent_id, status);
 `
 
 // ---- 管理员账号 ----
@@ -236,4 +256,267 @@ func validMeta(s string) bool {
 	}
 	var v map[string]any
 	return json.Unmarshal([]byte(s), &v) == nil
+}
+
+// ---- 任务与指派 ----
+
+// 指派状态机：pending → delivered → done/failed；pending/delivered 可被取消为 canceled。
+const (
+	AsPending   = "pending"
+	AsDelivered = "delivered"
+	AsDone      = "done"
+	AsFailed    = "failed"
+	AsCanceled  = "canceled"
+)
+
+// Task 是一条派发给一个或多个 Agent 的纯文本任务。
+type Task struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Content    string `json:"content"`
+	CreatedAt  int64  `json:"created_at"`
+	CanceledAt *int64 `json:"canceled_at,omitempty"`
+}
+
+// Assignment 是任务指派给单个 Agent 的执行单元。
+type Assignment struct {
+	ID            string `json:"id"`
+	TaskID        string `json:"task_id"`
+	AgentID       string `json:"agent_id"`
+	AgentName     string `json:"agent_name"` // LEFT JOIN agents，空串表示 Agent 已删除
+	AgentLastSeen int64  `json:"-"`
+	Status        string `json:"status"`
+	DeliveredAt   *int64 `json:"delivered_at,omitempty"`
+	Result        string `json:"result,omitempty"`
+	ResultAt      *int64 `json:"result_at,omitempty"`
+}
+
+// agentsExist 校验给定 Agent ID 是否全部存在。
+func (s *store) agentsExist(ids []string) (bool, error) {
+	for _, id := range ids {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE id = ?`, id).Scan(&n); err != nil {
+			return false, err
+		}
+		if n == 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// createTask 在一个事务里创建任务及其全部指派。
+func (s *store) createTask(title, content string, agentIDs []string) (*Task, error) {
+	t := &Task{ID: "tsk_" + randHex(8), Title: title, Content: content, CreatedAt: time.Now().Unix()}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO tasks (id, title, content, created_at) VALUES (?,?,?,?)`,
+		t.ID, t.Title, t.Content, t.CreatedAt); err != nil {
+		return nil, err
+	}
+	for _, aid := range agentIDs {
+		if _, err := tx.Exec(
+			`INSERT INTO task_assignments (id, task_id, agent_id, status) VALUES (?,?,?,'pending')`,
+			"tsa_"+randHex(8), t.ID, aid); err != nil {
+			return nil, err
+		}
+	}
+	return t, tx.Commit()
+}
+
+// listTasks 返回最近的任务及其指派（按任务创建时间倒序，指派按创建顺序）。
+func (s *store) listTasks(limit int) ([]Task, map[string][]Assignment, error) {
+	rows, err := s.db.Query(
+		`SELECT id, title, content, created_at, canceled_at FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	tasks := []Task{}
+	keep := map[string]bool{}
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.Title, &t.Content, &t.CreatedAt, &t.CanceledAt); err != nil {
+			return nil, nil, err
+		}
+		keep[t.ID] = true
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	assigns := map[string][]Assignment{}
+	arows, err := s.db.Query(
+		`SELECT a.id, a.task_id, a.agent_id, COALESCE(g.name, ''), a.status,
+		        a.delivered_at, a.result, a.result_at, COALESCE(g.last_seen, 0)
+		 FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
+		 ORDER BY a.rowid`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer arows.Close()
+	for arows.Next() {
+		var a Assignment
+		if err := arows.Scan(&a.ID, &a.TaskID, &a.AgentID, &a.AgentName, &a.Status,
+			&a.DeliveredAt, &a.Result, &a.ResultAt, &a.AgentLastSeen); err != nil {
+			return nil, nil, err
+		}
+		if keep[a.TaskID] {
+			assigns[a.TaskID] = append(assigns[a.TaskID], a)
+		}
+	}
+	return tasks, assigns, arows.Err()
+}
+
+// taskByID 读取单个任务，不存在时返回 errTaskNotFound。
+func (s *store) taskByID(id string) (*Task, error) {
+	var t Task
+	err := s.db.QueryRow(
+		`SELECT id, title, content, created_at, canceled_at FROM tasks WHERE id = ?`, id).
+		Scan(&t.ID, &t.Title, &t.Content, &t.CreatedAt, &t.CanceledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errTaskNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+var errTaskNotFound = errors.New("任务不存在")
+var errTaskFinished = errors.New("任务已全部结束，无需取消")
+var errAssignState = errors.New("指派当前状态不允许该操作")
+var errAssignNotFound = errors.New("指派不存在")
+
+// cancelTask 取消任务：标记取消时间，并把未结束的指派置为 canceled。
+func (s *store) cancelTask(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var canceledAt *int64
+	err = tx.QueryRow(`SELECT canceled_at FROM tasks WHERE id = ?`, id).Scan(&canceledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errTaskNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if canceledAt != nil {
+		return errTaskFinished
+	}
+	var open int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM task_assignments WHERE task_id = ? AND status IN ('pending','delivered')`, id).
+		Scan(&open); err != nil {
+		return err
+	}
+	if open == 0 {
+		return errTaskFinished
+	}
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`UPDATE tasks SET canceled_at = ? WHERE id = ?`, now, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE task_assignments SET status = 'canceled' WHERE task_id = ? AND status IN ('pending','delivered')`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// requeueAssignment 把疑似卡住的 delivered 指派重置回 pending，允许 Agent 重新拉取。
+func (s *store) requeueAssignment(id string) error {
+	res, err := s.db.Exec(
+		`UPDATE task_assignments SET status = 'pending', delivered_at = NULL WHERE id = ? AND status = 'delivered'`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return errAssignState
+	}
+	return nil
+}
+
+// pulledTask 是 Agent 拉取接口返回的任务视图。
+type pulledTask struct {
+	AssignmentID string `json:"assignment_id"`
+	TaskID       string `json:"task_id"`
+	Title        string `json:"title"`
+	Content      string `json:"content"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+// pullAssignments 原子地把 Agent 的待拉取指派置为 delivered 并返回，重复拉取不会重复投递。
+func (s *store) pullAssignments(agentID string, limit int) ([]pulledTask, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(
+		`SELECT a.id, a.task_id, t.title, t.content, t.created_at
+		 FROM task_assignments a JOIN tasks t ON t.id = a.task_id
+		 WHERE a.agent_id = ? AND a.status = 'pending' AND t.canceled_at IS NULL
+		 ORDER BY t.created_at ASC, a.rowid ASC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := []pulledTask{}
+	for rows.Next() {
+		var p pulledTask
+		if err := rows.Scan(&p.AssignmentID, &p.TaskID, &p.Title, &p.Content, &p.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	for _, p := range out {
+		if _, err := tx.Exec(
+			`UPDATE task_assignments SET status = 'delivered', delivered_at = ? WHERE id = ? AND status = 'pending'`,
+			now, p.AssignmentID); err != nil {
+			return nil, err
+		}
+	}
+	return out, tx.Commit()
+}
+
+// writeResult 回写执行结果：只允许对自己的 delivered 指派写一次。
+func (s *store) writeResult(assignmentID, agentID, status, result string) error {
+	res, err := s.db.Exec(
+		`UPDATE task_assignments SET status = ?, result = ?, result_at = ?
+		 WHERE id = ? AND agent_id = ? AND status = 'delivered'`,
+		status, result, time.Now().Unix(), assignmentID, agentID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var st, aid string
+	err = s.db.QueryRow(`SELECT status, agent_id FROM task_assignments WHERE id = ?`, assignmentID).Scan(&st, &aid)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && aid != agentID) {
+		return errAssignNotFound // 不暴露他人指派的存在性
+	}
+	if err != nil {
+		return err
+	}
+	return errAssignState
+}
+
+// cancelOpenAssignmentsForAgent 删除 Agent 时取消其未结束的指派，历史保留。
+func (s *store) cancelOpenAssignmentsForAgent(agentID string) error {
+	_, err := s.db.Exec(
+		`UPDATE task_assignments SET status = 'canceled' WHERE agent_id = ? AND status IN ('pending','delivered')`, agentID)
+	return err
 }

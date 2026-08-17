@@ -18,8 +18,9 @@ const heartbeatInterval = 60
 type server struct {
 	cfg        *config
 	store      *store
-	rl         *rateLimiter
-	sessionKey string // 会话签名密钥，持久化在 settings 表
+	rl         *rateLimiter // 登录/注册等敏感公开接口
+	pullRl     *rateLimiter // Agent 拉取任务，阈值宽松
+	sessionKey string       // 会话签名密钥，持久化在 settings 表
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -394,6 +395,9 @@ func (s *server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(id, "am_") {
 		writeError(w, http.StatusBadRequest, "无效的 Agent ID")
 		return
+	}
+	if err := s.store.cancelOpenAssignmentsForAgent(id); err != nil {
+		log.Printf("取消 Agent 未结束指派失败 (%s): %v", id, err)
 	}
 	if err := s.store.deleteAgent(id); err != nil {
 		log.Printf("删除 Agent 失败: %v", err)

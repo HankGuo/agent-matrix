@@ -368,7 +368,7 @@ input:focus {
   letter-spacing: -0.01em;
 }
 
-#promptText {
+#promptText, #taskLoopText {
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -381,6 +381,136 @@ input:focus {
   max-height: 56vh;
   overflow-y: auto;
   user-select: text;
+}
+
+/* 视图切换（Agent / 任务） */
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px;
+  margin-bottom: 26px;
+}
+.tab {
+  border: none;
+  background: transparent;
+  padding: 7px 22px;
+  border-radius: 999px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+.tab:hover { color: var(--ink); }
+.tab.active { background: var(--ink); color: var(--paper); }
+
+/* 任务状态徽章 */
+.pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.pill.green { background: var(--accent-soft); color: var(--accent-ink); }
+.pill.amber { background: #f7efdc; color: #8a6d1d; }
+.pill.red { background: #f7ecea; color: var(--danger); }
+.pill.gray { background: #efede7; color: var(--muted); }
+
+/* 任务列表 */
+.taskhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.taskhead .muted { flex: 1; }
+.task-assignees { color: var(--ink-2); }
+
+/* 新建任务面板 */
+textarea {
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  padding: 10px 13px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 120px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+}
+textarea:hover { border-color: #c8c3b6; }
+textarea:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.picker { display: grid; gap: 8px; margin-top: 4px; }
+.pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.pick:hover { border-color: var(--line-strong); background: #faf9f5; }
+.pick input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+.pick-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 任务详情 */
+.task-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.result-block {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.subhead {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+  margin-bottom: 12px;
+}
+.asgn {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 10px;
+}
+.asgn-head { display: flex; align-items: center; gap: 8px; }
+.asgn-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asgn > .sub { margin-top: 4px; }
+.asgn > .btn { margin-top: 8px; }
+.result-view {
+  margin-top: 10px;
+  background: var(--paper);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 /* 桌面默认显示完整按钮文案 */
@@ -424,7 +554,12 @@ input:focus {
   .acard-meta dd { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 
   /* iOS 输入框小于 16px 会自动放大页面 */
-  input { font-size: 16px; }
+  input, textarea { font-size: 16px; }
+
+  .tabs { margin-bottom: 18px; }
+  .tab { padding: 6px 18px; }
+  .taskhead { margin-bottom: 12px; }
+  .result-block { max-height: 40vh; }
 
   .auth-wrap { padding-top: 5vh; }
   .auth-card { padding: 28px 22px 26px; border-radius: 14px; }
