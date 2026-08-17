@@ -15,9 +15,10 @@ import (
 const heartbeatInterval = 60
 
 type server struct {
-	cfg   *config
-	store *store
-	rl    *rateLimiter
+	cfg        *config
+	store      *store
+	rl         *rateLimiter
+	sessionKey string // 会话签名密钥，持久化在 settings 表
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -172,21 +173,99 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 // ---- 管理端接口 ----
 
+// handleAuthStatus 向 WebUI 报告认证状态：是否需要初始化、是否启用令牌应急登录。
+func (s *server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
+	has, err := s.store.hasAdmin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"needs_setup": !has,
+		"env_login":   s.cfg.AdminToken != "",
+	})
+}
+
+// handleSetup 首次访问初始化管理员账号，仅在无任何账号时可用。
+func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if !s.rl.allow("setup:" + clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
+		return
+	}
+	has, err := s.store.hasAdmin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	if has {
+		writeError(w, http.StatusForbidden, "管理员账号已存在，请直接登录")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Username = clean(req.Username, 32)
+	if !validUsername(req.Username) {
+		writeError(w, http.StatusBadRequest, "账号需 2-32 位，仅限字母、数字、_ . -")
+		return
+	}
+	if len(req.Password) < 8 || len(req.Password) > 128 {
+		writeError(w, http.StatusBadRequest, "密码长度需 8-128 位")
+		return
+	}
+	hash, err := hashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	if err := s.store.createAdmin(req.Username, hash); err != nil {
+		log.Printf("创建管理员失败: %v", err)
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	log.Printf("管理员账号已初始化: %q", req.Username)
+	s.setSessionCookie(w, r)
+	writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
+}
+
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.rl.allow("login:" + clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
 		return
 	}
 	var req struct {
-		Token string `json:"token"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Token    string `json:"token"` // 应急通道：AGENT_MATRIX_ADMIN_TOKEN
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.cfg.AdminToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, "口令错误")
+	// 应急令牌通道（仅当配置了环境变量时开放）
+	if req.Token != "" && s.cfg.AdminToken != "" &&
+		subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.cfg.AdminToken)) == 1 {
+		s.setSessionCookie(w, r)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
+	// 账号密码通道
+	if req.Username != "" || req.Password != "" {
+		hash, err := s.store.adminPasswordHash(clean(req.Username, 32))
+		if err == nil && verifyPassword(req.Password, hash) {
+			s.setSessionCookie(w, r)
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+			return
+		}
+	}
+	writeError(w, http.StatusUnauthorized, "账号或密码错误")
+}
+
+// setSessionCookie 种下 7 天有效的会话 Cookie。
+func (s *server) setSessionCookie(w http.ResponseWriter, r *http.Request) {
 	exp := time.Now().Add(sessionTTL).Unix()
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -197,7 +276,21 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   r.TLS != nil,
 		Expires:  time.Unix(exp, 0),
 	})
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// validUsername 限制账号字符集，避免界面注入与日志污染。
+func validUsername(s string) bool {
+	if len(s) < 2 || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '.' || r == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, _ *http.Request) {

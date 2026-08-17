@@ -47,22 +47,21 @@ go build -o agent-matrix .
 ### 运行
 
 ```bash
-export AGENT_MATRIX_ADMIN_TOKEN='你的管理口令'          # 必填，登录 WebUI 用
 export AGENT_MATRIX_BASE_URL='https://matrix.example.com'  # 对外地址，写入接入指令
 ./agent-matrix
 ```
 
-打开 `http://localhost:8080`（或你的域名），输入管理口令即可。
+打开 `http://localhost:8080`（或你的域名）。**首次访问会强制进入初始化页**：设置管理员账号和密码（PBKDF2-SHA256 加盐存储），作为后续登录凭证。初始化完成后，管理接口和仪表盘都只接受该账号登录。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `AGENT_MATRIX_ADMIN_TOKEN` | —（必填） | WebUI 管理口令 |
 | `AGENT_MATRIX_ADDR` | `:8080` | HTTP 监听地址 |
 | `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite 数据库路径 |
 | `AGENT_MATRIX_BASE_URL` | `http://localhost:8080` | 对外访问地址，用于生成接入指令 |
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | 超过该时长无心跳判定离线 |
+| `AGENT_MATRIX_ADMIN_TOKEN` | 空（可选） | 应急登录令牌。设置后登录页可用它替代账号密码；用于忘记密码等场景，不设置则只有账号密码一条路 |
 
 ### 生产部署建议
 
@@ -74,7 +73,6 @@ Description=Agent Matrix
 After=network.target
 
 [Service]
-Environment=AGENT_MATRIX_ADMIN_TOKEN=换成强口令
 Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
 Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
 ExecStart=/usr/local/bin/agent-matrix
@@ -103,7 +101,9 @@ WantedBy=multi-user.target
 |---|---|---|---|
 | `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌 |
 | `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（可选携带 `meta` JSON） |
-| `POST` | `/api/login` | 管理口令 | WebUI 登录，种会话 Cookie |
+| `GET` | `/api/auth/status` | 无 | 查询是否需要初始化、是否启用应急令牌 |
+| `POST` | `/api/setup` | 仅未初始化时可用 | 首次访问创建管理员账号 |
+| `POST` | `/api/login` | 账号密码 / 应急令牌 | WebUI 登录，种会话 Cookie |
 | `GET` | `/api/agents` | 会话 Cookie | Agent 列表（含在线状态） |
 | `POST` | `/api/enrollments` | 会话 Cookie | 生成一次性令牌 + 接入指令 |
 | `DELETE` | `/api/agents/{id}` | 会话 Cookie | 删除 Agent |

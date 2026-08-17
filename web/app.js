@@ -4,55 +4,109 @@
 const $ = (sel) => document.querySelector(sel);
 
 const loginView = $("#loginView");
+const setupView = $("#setupView");
 const dashView = $("#dashView");
 const topActions = $("#topActions");
 let refreshTimer = null;
+let useTokenLogin = false;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
-  if (res.status === 401 && path !== "/api/login") {
-    showLogin();
+  if (res.status === 401 && path !== "/api/login" && path !== "/api/setup") {
+    boot();
     throw new Error("unauthorized");
   }
   return res;
 }
 
-function showLogin() {
-  loginView.hidden = false;
+function hideAll() {
+  loginView.hidden = true;
+  setupView.hidden = true;
   dashView.hidden = true;
   topActions.hidden = true;
   if (refreshTimer) clearInterval(refreshTimer);
 }
 
+function showLogin(envLogin) {
+  hideAll();
+  loginView.hidden = false;
+  $("#loginToggle").hidden = !envLogin;
+  $("#loginError").hidden = true;
+}
+
+function showSetup() {
+  hideAll();
+  setupView.hidden = false;
+  $("#setupError").hidden = true;
+}
+
 function showDash() {
-  loginView.hidden = true;
+  hideAll();
   dashView.hidden = false;
   topActions.hidden = false;
   loadAgents();
-  if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(loadAgents, 15000);
 }
 
+/* ---- 初始化（首次访问强制设置账号） ---- */
+
+$("#setupForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errEl = $("#setupError");
+  errEl.hidden = true;
+  const username = $("#setupUser").value.trim();
+  const password = $("#setupPass").value;
+  if (password !== $("#setupPass2").value) {
+    errEl.textContent = "两次输入的密码不一致";
+    errEl.hidden = false;
+    return;
+  }
+  try {
+    const res = await api("/api/setup", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      errEl.textContent = (await res.json()).error || "初始化失败";
+      errEl.hidden = false;
+      return;
+    }
+    showDash();
+  } catch {
+    errEl.textContent = "网络错误";
+    errEl.hidden = false;
+  }
+});
+
 /* ---- 登录 / 退出 ---- */
+
+$("#loginToggleLink").addEventListener("click", (e) => {
+  e.preventDefault();
+  useTokenLogin = !useTokenLogin;
+  $("#accountFields").hidden = useTokenLogin;
+  $("#tokenField").hidden = !useTokenLogin;
+  $("#loginToggleLink").textContent = useTokenLogin ? "改用账号密码登录" : "改用应急令牌登录";
+});
 
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const errEl = $("#loginError");
   errEl.hidden = true;
+  const body = useTokenLogin
+    ? { token: $("#loginToken").value }
+    : { username: $("#loginUser").value.trim(), password: $("#loginPass").value };
   try {
-    const res = await api("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ token: $("#loginToken").value }),
-    });
+    const res = await api("/api/login", { method: "POST", body: JSON.stringify(body) });
     if (!res.ok) {
       errEl.textContent = (await res.json()).error || "登录失败";
       errEl.hidden = false;
       return;
     }
     $("#loginToken").value = "";
+    $("#loginPass").value = "";
     showDash();
   } catch {
     errEl.textContent = "网络错误";
@@ -62,7 +116,7 @@ $("#loginForm").addEventListener("submit", async (e) => {
 
 $("#btnLogout").addEventListener("click", async () => {
   await api("/api/logout", { method: "POST", body: "{}" });
-  showLogin();
+  boot();
 });
 
 /* ---- Agent 列表 ---- */
@@ -202,12 +256,21 @@ $("#btnCopy").addEventListener("click", async () => {
   setTimeout(() => (btn.textContent = "复制指令"), 2000);
 });
 
-/* ---- 启动：探测会话 ---- */
-(async () => {
+/* ---- 启动：探测会话与初始化状态 ---- */
+async function boot() {
   try {
-    const res = await api("/api/agents");
-    if (res.ok) showDash(); else showLogin();
+    const res = await fetch("/api/agents");
+    if (res.ok) {
+      showDash();
+      return;
+    }
+  } catch { /* 继续走状态探测 */ }
+  try {
+    const st = await (await fetch("/api/auth/status")).json();
+    if (st.needs_setup) showSetup();
+    else showLogin(st.env_login);
   } catch {
-    showLogin();
+    showLogin(false);
   }
-})();
+}
+boot();

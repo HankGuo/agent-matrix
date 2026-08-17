@@ -21,12 +21,30 @@
 </header>
 
 <main>
+  <section id="setupView" class="center" hidden>
+    <form id="setupForm" class="card login-card">
+      <h1>初始化管理员账号</h1>
+      <p class="muted">首次访问，请设置账号和密码，作为后续登录凭证</p>
+      <input id="setupUser" placeholder="账号（2-32 位字母数字 _ . -）" autocomplete="username" maxlength="32" required>
+      <input type="password" id="setupPass" placeholder="密码（至少 8 位）" autocomplete="new-password" minlength="8" maxlength="128" required>
+      <input type="password" id="setupPass2" placeholder="确认密码" autocomplete="new-password" required>
+      <button class="btn primary full" type="submit">创建并进入</button>
+      <p class="error" id="setupError" hidden></p>
+    </form>
+  </section>
+
   <section id="loginView" class="center" hidden>
     <form id="loginForm" class="card login-card">
-      <h1>管理口令</h1>
-      <p class="muted">输入 <code>AGENT_MATRIX_ADMIN_TOKEN</code> 进入控制台</p>
-      <input type="password" id="loginToken" placeholder="••••••••" autocomplete="current-password" required>
+      <h1>登录</h1>
+      <div id="accountFields">
+        <input id="loginUser" placeholder="账号" autocomplete="username">
+        <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password">
+      </div>
+      <div id="tokenField" hidden>
+        <input type="password" id="loginToken" placeholder="AGENT_MATRIX_ADMIN_TOKEN" autocomplete="off">
+      </div>
       <button class="btn primary full" type="submit">登 录</button>
+      <p class="toggle muted" id="loginToggle" hidden><a href="#" id="loginToggleLink">改用应急令牌登录</a></p>
       <p class="error" id="loginError" hidden></p>
     </form>
   </section>

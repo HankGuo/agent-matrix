@@ -47,22 +47,21 @@ Or `go install github.com/HankGuo/agent-matrix@latest`.
 ### Run
 
 ```bash
-export AGENT_MATRIX_ADMIN_TOKEN='your-admin-token'              # required, WebUI login
 export AGENT_MATRIX_BASE_URL='https://matrix.example.com'       # public URL, baked into prompts
 ./agent-matrix
 ```
 
-Open `http://localhost:8080` (or your domain) and enter the admin token.
+Open `http://localhost:8080` (or your domain). **The first visit forces an initial-setup page**: create an admin username and password (stored salted with PBKDF2-SHA256) — these become your login credentials. Once set up, all admin APIs and the dashboard require this account.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENT_MATRIX_ADMIN_TOKEN` | — (required) | WebUI admin token |
 | `AGENT_MATRIX_ADDR` | `:8080` | HTTP listen address |
 | `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite database path |
 | `AGENT_MATRIX_BASE_URL` | `http://localhost:8080` | Public URL used in onboarding prompts |
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | Mark offline after this long without heartbeat |
+| `AGENT_MATRIX_ADMIN_TOKEN` | empty (optional) | Emergency login token. If set, the login page can use it instead of username+password (e.g. forgotten password); without it, account login is the only path |
 
 ### Production tips
 
@@ -74,7 +73,6 @@ Description=Agent Matrix
 After=network.target
 
 [Service]
-Environment=AGENT_MATRIX_ADMIN_TOKEN=use-a-strong-token
 Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
 Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
 ExecStart=/usr/local/bin/agent-matrix
@@ -103,7 +101,9 @@ WantedBy=multi-user.target
 |---|---|---|---|
 | `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token |
 | `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (optional `meta` JSON) |
-| `POST` | `/api/login` | admin token | WebUI login, sets session cookie |
+| `GET` | `/api/auth/status` | none | Whether setup is needed / emergency token enabled |
+| `POST` | `/api/setup` | only before setup | Create the admin account on first visit |
+| `POST` | `/api/login` | username+password / emergency token | WebUI login, sets session cookie |
 | `GET` | `/api/agents` | session cookie | Agent list with online status |
 | `POST` | `/api/enrollments` | session cookie | Issue one-time token + onboarding prompt |
 | `DELETE` | `/api/agents/{id}` | session cookie | Delete agent |

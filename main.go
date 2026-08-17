@@ -30,10 +30,16 @@ func main() {
 	}
 	defer store.Close()
 
+	sessionKey, err := store.sessionSecret()
+	if err != nil {
+		log.Fatalf("初始化会话密钥失败: %v", err)
+	}
+
 	s := &server{
-		cfg:   cfg,
-		store: store,
-		rl:    newRateLimiter(10, time.Minute),
+		cfg:        cfg,
+		store:      store,
+		rl:         newRateLimiter(10, time.Minute),
+		sessionKey: sessionKey,
 	}
 
 	static, err := fs.Sub(webFS, "web")
@@ -45,6 +51,8 @@ func main() {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/heartbeat", s.handleHeartbeat)
+	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/setup", s.handleSetup)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/agents", s.requireAdmin(s.handleListAgents))

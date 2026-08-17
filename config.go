@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,9 +33,8 @@ func loadConfig() (*config, error) {
 		cfg.OnlineTimeout = d
 	}
 	if cfg.AdminToken == "" {
-		return nil, errors.New("缺少 AGENT_MATRIX_ADMIN_TOKEN（WebUI 管理口令）")
-	}
-	if len(cfg.AdminToken) < 8 {
+		log.Println("提示: 未设置 AGENT_MATRIX_ADMIN_TOKEN，首次访问 WebUI 将强制初始化管理员账号")
+	} else if len(cfg.AdminToken) < 8 {
 		log.Println("警告: AGENT_MATRIX_ADMIN_TOKEN 长度不足 8 位，建议使用更强的口令")
 	}
 	return cfg, nil

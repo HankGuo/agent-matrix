@@ -62,7 +62,58 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at INTEGER NOT NULL,
     last_seen  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS admin_credentials (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `
+
+// ---- 管理员账号 ----
+
+// hasAdmin 报告是否已初始化管理员账号。
+func (s *store) hasAdmin() (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM admin_credentials`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *store) createAdmin(username, passwordHash string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO admin_credentials (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)`,
+		username, passwordHash, time.Now().Unix(),
+	)
+	return err
+}
+
+// adminPasswordHash 返回指定账号的密码哈希。
+func (s *store) adminPasswordHash(username string) (string, error) {
+	var hash string
+	err := s.db.QueryRow(`SELECT password_hash FROM admin_credentials WHERE username = ?`, username).Scan(&hash)
+	return hash, err
+}
+
+// sessionSecret 返回持久的会话签名密钥，不存在则生成。
+func (s *store) sessionSecret() (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'session_secret'`).Scan(&v)
+	if err == nil {
+		return v, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	v = randToken(32)
+	_, err = s.db.Exec(`INSERT INTO settings (key, value) VALUES ('session_secret', ?)`, v)
+	return v, err
+}
 
 var errInvalidToken = errors.New("令牌无效、已使用或已过期")
 
