@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.2.0"
+const version = "0.3.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -61,6 +61,8 @@ func main() {
 	mux.HandleFunc("GET /api/agents", s.requireAdmin(s.handleListAgents))
 	mux.HandleFunc("DELETE /api/agents/{id}", s.requireAdmin(s.handleDeleteAgent))
 	mux.HandleFunc("POST /api/enrollments", s.requireAdmin(s.handleCreateEnrollment))
+	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.handleGetSettings))
+	mux.HandleFunc("POST /api/settings", s.requireAdmin(s.handleUpdateSettings))
 	mux.Handle("GET /", http.FileServerFS(static))
 
 	httpSrv := &http.Server{

@@ -25,6 +25,7 @@
   </div>
   <div class="actions" id="topActions" hidden>
     <button class="btn primary" id="btnNew">接入新 Agent</button>
+    <button class="btn text" id="btnSettings">设置</button>
     <button class="btn text" id="btnLogout">退出</button>
   </div>
 </header>
@@ -44,6 +45,10 @@
       <label class="field"><span>确认密码</span>
         <input type="password" id="setupPass2" placeholder="再输入一次" autocomplete="new-password" required>
       </label>
+      <label class="field"><span>平台地址</span>
+        <input id="setupBaseURL" placeholder="https://matrix.example.com" inputmode="url">
+      </label>
+      <p class="hint">Agent 的注册与心跳请求都发往这个地址。用服务器 IP 或域名均可，之后可在「设置」里随时修改。</p>
       <button class="btn primary full" type="submit">创建并进入</button>
       <p class="error" id="setupError" hidden></p>
     </form>
@@ -125,6 +130,22 @@
     <pre id="promptText"></pre>
     <button class="btn primary full" id="btnCopy">复制指令</button>
   </div>
+</aside>
+
+<!-- 设置面板（右侧滑出） -->
+<aside class="slideover" id="settingsPanel" aria-label="设置">
+  <header class="slideover-head">
+    <h2>设置</h2>
+    <button class="btn text" id="btnSettingsClose">关闭</button>
+  </header>
+  <label class="field"><span>平台地址（Base URL）</span>
+    <input id="setBaseURL" placeholder="https://matrix.example.com" inputmode="url">
+  </label>
+  <p class="hint">Agent 的注册与心跳请求都发往这个地址，新生成的接入指令立即生效。<br>注意：已接入 Agent 的心跳地址在首次注册时已写入其本地配置，改地址后需要重新接入。</p>
+  <button class="btn primary full" id="btnSaveSettings">保存</button>
+  <p class="ok" id="settingsSaved" hidden>已保存</p>
+  <div class="divider"></div>
+  <p class="muted small" id="settingsVer"></p>
 </aside>
 
 <script src="/app.js"></script>

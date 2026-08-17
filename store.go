@@ -100,10 +100,23 @@ func (s *store) adminPasswordHash(username string) (string, error) {
 	return hash, err
 }
 
+// getSetting 读取设置项。
+func (s *store) getSetting(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	return v, err
+}
+
+// setSetting 写入设置项（存在则覆盖）。
+func (s *store) setSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?,?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
 // sessionSecret 返回持久的会话签名密钥，不存在则生成。
 func (s *store) sessionSecret() (string, error) {
-	var v string
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'session_secret'`).Scan(&v)
+	v, err := s.getSetting("session_secret")
 	if err == nil {
 		return v, nil
 	}
@@ -111,8 +124,7 @@ func (s *store) sessionSecret() (string, error) {
 		return "", err
 	}
 	v = randToken(32)
-	_, err = s.db.Exec(`INSERT INTO settings (key, value) VALUES ('session_secret', ?)`, v)
-	return v, err
+	return v, s.setSetting("session_secret", v)
 }
 
 var errInvalidToken = errors.New("令牌无效、已使用或已过期")

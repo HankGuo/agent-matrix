@@ -260,6 +260,9 @@ input:focus {
 .sub { color: var(--muted); font-size: 12.5px; }
 .muted { color: var(--muted); }
 .small { font-size: 12.5px; }
+.hint { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin: -6px 0 16px; }
+.ok { color: var(--accent-ink); font-size: 13px; margin-top: 12px; text-align: center; }
+.divider { border-top: 1px solid var(--line); margin: 26px 0 16px; }
 
 /* 空状态 */
 .empty { padding: 72px 40px 76px; text-align: center; }

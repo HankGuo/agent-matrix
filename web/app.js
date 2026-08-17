@@ -68,7 +68,11 @@ $("#setupForm").addEventListener("submit", async (e) => {
   try {
     const res = await api("/api/setup", {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({
+        username,
+        password,
+        base_url: $("#setupBaseURL").value.trim(),
+      }),
     });
     if (!res.ok) {
       errEl.textContent = (await res.json()).error || "初始化失败";
@@ -241,6 +245,7 @@ async function removeAgent(a) {
 
 const panel = $("#enrollPanel");
 const panelMask = $("#panelMask");
+const settingsPanel = $("#settingsPanel");
 
 function openPanel() {
   $("#enrollForm").hidden = false;
@@ -251,17 +256,52 @@ function openPanel() {
   $("#enrollLabel").focus();
 }
 
-function closePanel() {
+function closePanels() {
   panel.classList.remove("show");
+  settingsPanel.classList.remove("show");
   panelMask.classList.remove("show");
 }
 
 $("#btnNew").addEventListener("click", openPanel);
 $("#btnNewEmpty").addEventListener("click", openPanel);
-$("#btnClose").addEventListener("click", closePanel);
-panelMask.addEventListener("click", closePanel);
+$("#btnClose").addEventListener("click", closePanels);
+panelMask.addEventListener("click", closePanels);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closePanel();
+  if (e.key === "Escape") closePanels();
+});
+
+/* ---- 设置面板 ---- */
+
+$("#btnSettings").addEventListener("click", async () => {
+  try {
+    const res = await api("/api/settings");
+    if (res.ok) {
+      const data = await res.json();
+      $("#setBaseURL").value = data.base_url || "";
+      $("#settingsVer").textContent = "Agent Matrix v" + (data.version || "");
+    }
+  } catch { /* 保持旧值 */ }
+  $("#settingsSaved").hidden = true;
+  settingsPanel.classList.add("show");
+  panelMask.classList.add("show");
+});
+
+$("#btnSettingsClose").addEventListener("click", closePanels);
+
+$("#btnSaveSettings").addEventListener("click", async () => {
+  const res = await api("/api/settings", {
+    method: "POST",
+    body: JSON.stringify({ base_url: $("#setBaseURL").value }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    alert(data.error || "保存失败");
+    return;
+  }
+  $("#setBaseURL").value = data.base_url;
+  const ok = $("#settingsSaved");
+  ok.hidden = false;
+  setTimeout(() => (ok.hidden = true), 2000);
 });
 
 $("#btnGen").addEventListener("click", async () => {
@@ -307,6 +347,7 @@ async function boot() {
   try {
     const st = await (await fetch("/api/auth/status")).json();
     if (st.version) $("#ver").textContent = "Agent Matrix v" + st.version;
+    if (st.base_url) $("#setupBaseURL").value = st.base_url;
     if (st.needs_setup) showSetup();
     else showLogin(st.env_login);
   } catch {

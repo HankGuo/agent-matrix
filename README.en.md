@@ -164,7 +164,7 @@ export AGENT_MATRIX_BASE_URL='https://matrix.example.com'       # public URL, ba
 ./agent-matrix
 ```
 
-Open `http://localhost:26817` (or your domain). **The first visit forces an initial-setup page**: create an admin username and password (stored salted with PBKDF2-SHA256) — these become your login credentials. Once set up, all admin APIs and the dashboard require this account.
+Open `http://localhost:26817` (or your domain). **The first visit forces an initial-setup page**: create an admin username and password (stored salted with PBKDF2-SHA256), and optionally set the platform base URL right there. Once set up, all admin APIs and the dashboard require this account; the base URL can be changed anytime under "设置" (Settings).
 
 ### Environment variables
 
@@ -172,7 +172,7 @@ Open `http://localhost:26817` (or your domain). **The first visit forces an init
 |---|---|---|
 | `AGENT_MATRIX_ADDR` | `:26817` | HTTP listen address |
 | `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite database path |
-| `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | Public URL used in onboarding prompts |
+| `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | Public URL used in onboarding prompts. Can also be changed in WebUI Settings after deployment — **the WebUI setting takes precedence over the env var** |
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | Mark offline after this long without heartbeat |
 | `AGENT_MATRIX_ADMIN_TOKEN` | empty (optional) | Emergency login token. If set, the login page can use it instead of username+password (e.g. forgotten password); without it, account login is the only path |
 
@@ -219,6 +219,7 @@ WantedBy=multi-user.target
 | `POST` | `/api/login` | username+password / emergency token | WebUI login, sets session cookie |
 | `GET` | `/api/agents` | session cookie | Agent list with online status |
 | `POST` | `/api/enrollments` | session cookie | Issue one-time token + onboarding prompt |
+| `GET` / `POST` | `/api/settings` | session cookie | Read / update the platform base URL |
 | `DELETE` | `/api/agents/{id}` | session cookie | Delete agent |
 | `GET` | `/healthz` | none | Health check |
 

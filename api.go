@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -183,8 +184,63 @@ func (s *server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"needs_setup": !has,
 		"env_login":   s.cfg.AdminToken != "",
+		"base_url":    s.baseURL(),
 		"version":     version,
 	})
+}
+
+// baseURL 返回生效的平台对外地址：WebUI 设置优先，其次环境变量/默认值。
+func (s *server) baseURL() string {
+	if v, err := s.store.getSetting("base_url"); err == nil && v != "" {
+		return v
+	}
+	return s.cfg.BaseURL
+}
+
+// normalizeBaseURL 校验并规范化平台地址。
+func normalizeBaseURL(s string) (string, error) {
+	s = strings.TrimRight(strings.TrimSpace(s), "/")
+	if s == "" {
+		return "", errors.New("平台地址不能为空")
+	}
+	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		return "", errors.New("平台地址必须以 http:// 或 https:// 开头")
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return "", errors.New("平台地址不是合法 URL")
+	}
+	return s, nil
+}
+
+// handleGetSettings 返回当前设置（管理端）。
+func (s *server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"base_url": s.baseURL(),
+		"version":  version,
+	})
+}
+
+// handleUpdateSettings 更新设置（管理端）。目前仅支持平台地址。
+func (s *server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BaseURL string `json:"base_url"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	u, err := normalizeBaseURL(req.BaseURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.setSetting("base_url", u); err != nil {
+		log.Printf("保存设置失败: %v", err)
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	log.Printf("平台地址已更新: %s", u)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "base_url": u})
 }
 
 // handleSetup 首次访问初始化管理员账号，仅在无任何账号时可用。
@@ -205,6 +261,7 @@ func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		BaseURL  string `json:"base_url"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -217,6 +274,17 @@ func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if len(req.Password) < 8 || len(req.Password) > 128 {
 		writeError(w, http.StatusBadRequest, "密码长度需 8-128 位")
 		return
+	}
+	if req.BaseURL != "" {
+		u, err := normalizeBaseURL(req.BaseURL)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.store.setSetting("base_url", u); err != nil {
+			writeError(w, http.StatusInternalServerError, "内部错误")
+			return
+		}
 	}
 	hash, err := hashPassword(req.Password)
 	if err != nil {
@@ -354,6 +422,6 @@ func (s *server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token":      token,
 		"expires_at": exp,
-		"prompt":     buildPrompt(s.cfg.BaseURL, label, token),
+		"prompt":     buildPrompt(s.baseURL(), label, token),
 	})
 }
