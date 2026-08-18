@@ -56,9 +56,4 @@ func TestBuildPromptSlim(t *testing.T) {
 	if lines := strings.Count(p, "\n") + 1; lines > 40 {
 		t.Errorf("提示词过长: %d 行", lines)
 	}
-
-	up := buildTaskLoopPrompt("http://test.local")
-	if !strings.Contains(up, "/setup.sh") || !strings.Contains(up, "http://test.local") {
-		t.Error("升级指令应引导重新执行 setup.sh")
-	}
 }

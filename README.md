@@ -89,7 +89,6 @@ sequenceDiagram
 - **回收**：Agent 被告知把产出文件写到 `…/out/` 目录，执行结束后 runner 自动上传，详情页按指派分组展示
 - **存储**：默认 `local` 驱动，字节落在 `AGENT_MATRIX_ATTACH_DIR`（默认与数据库同级的 `attachments/`），流式读写、先写临时文件再 rename、下载支持 Range（音视频可拖进度条）；`AGENT_MATRIX_STORAGE` 预留 `s3` 扩展点（预签名直传，尚未实现）
 - **安全**：Agent 只能下载自己被指派任务的输入件；产出上传仅限 delivered 状态的指派；MIME 以服务端嗅探为准（客户端声明不可信）；默认强制下载，仅图片/音频/视频/PDF 白名单允许 inline 预览（且加 CSP sandbox）；删除任务/Agent 时级联清理文件
-- **注意**：附件能力要求 Agent 侧执行器为 v0.6+，老 Agent 重跑一遍 `setup.sh` 即升级（见「升级」）
 
 ### 指派状态机
 
@@ -136,8 +135,6 @@ sequenceDiagram
     A->>S: GET /api/tasks（WebUI 每 15s 轮询状态与结果）
 ```
 
-> 较早接入的 Agent 装着旧版执行器（或 v0.4 的 inbox 旧机制）：在 WebUI「设置」里点「生成补充指令」发给它即可升级——指令内容就是引导它**重新执行同一个 `setup.sh`**（幂等，已有配置自动跳过注册，只更新脚本与定时任务），不需要重新注册、不含密钥。
-
 ## 接入指令示例
 
 WebUI 生成的指令长这样（真实输出，一字未改）。复制后原样发给目标 Agent 即可：
@@ -181,11 +178,11 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 
 ## 特性
 
-- **提示词引导 + 托管安装脚本**：提示词只有十几行引导；静态逻辑收敛到服务器托管的幂等 `setup.sh`，改逻辑不用改提示词，老 Agent 重跑一遍即升级
+- **提示词引导 + 托管安装脚本**：提示词只有十几行引导；静态逻辑收敛到服务器托管的幂等 `setup.sh`，改逻辑不用改提示词，重跑一遍即升级到最新执行器
 - **任务派发（文本 + 附件）**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；附件随任务下发、产出自动回收；卡住的指派可手动重新投递
 - **首次访问强制初始化**：无任何账号时 WebUI 只开放初始化页，密码 PBKDF2-SHA256 加盐存储
 - **一次性注册令牌**：24 小时有效、只用一次；注册后换发独立心跳令牌，数据库只存哈希
-- **一键下线**：点「下线」后 Agent 立即从列表消失；其令牌转入墓碑表（保留 30 天），下次心跳收到 410 即触发自卸载（卸定时任务、删 `~/.agent-matrix`，runner 忙则自动推迟；机器关机的，开机后第一次心跳照样清理）。v0.7 之前接入的老 Agent 在「设置」里生成手动下线指令发给它即可
+- **一键下线**：点「下线」后 Agent 立即从列表消失；其令牌转入墓碑表（保留 30 天），下次心跳收到 410 即触发自卸载（卸定时任务、删 `~/.agent-matrix`，runner 忙则自动推迟；机器关机的，开机后第一次心跳照样清理）
 - **纯 WebUI**：管理端只需要浏览器；15 秒自动刷新状态灯与任务进度
 - **跨平台心跳**：安装脚本自动识别 Linux（cron / systemd user timer）、macOS（launchd），其余平台打印手动说明
 - **可靠部署**：一个静态二进制 + 一个 SQLite 文件，systemd 拉起即可；内建优雅退出、限流、安全响应头
@@ -269,11 +266,10 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 
 所有状态都在 `AGENT_MATRIX_DB` 指向的单个 SQLite 文件里，重启不清空；启动时自动 `CREATE TABLE IF NOT EXISTS`，新版本需要的表自动建好。**不要删库重来**——删库会丢掉管理员账号、所有 Agent 凭证与任务历史。
 
-**已接入的 Agent**：`setup.sh` 幂等，重跑一遍即升级到最新执行器（已有 config 自动跳过注册，心跳凭证不变，只更新脚本与定时任务）。三种触发方式任选：
+**已接入的 Agent**：`setup.sh` 幂等，重跑一遍即升级到最新执行器（已有 config 自动跳过注册，心跳凭证不变，只更新脚本与定时任务）。两种触发方式任选：
 
-1. WebUI「设置」→「生成补充指令」→ 发给该 Agent（指令内容就是引导它重跑 setup.sh）
-2. 直接派发一个自升级任务 @ 目标 Agent：内容写「执行 `curl -fsS <平台地址>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` 并汇报最后一行」——脚本写入是原子替换（临时文件 + mv），正在运行的执行器不会错乱
-3. 能 SSH 的话就手动：`curl -fsS <平台地址>/setup.sh | sh`
+1. 直接派发一个自升级任务 @ 目标 Agent：内容写「执行 `curl -fsS <平台地址>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` 并汇报最后一行」——脚本写入是原子替换（临时文件 + mv），正在运行的执行器不会错乱
+2. 能 SSH 的话就手动：`curl -fsS <平台地址>/setup.sh | sh`
 
 ## API 速览
 
@@ -299,8 +295,6 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `POST` | `/api/tasks/{id}/delete` | 会话 Cookie | 删除任务（级联删除指派、结果与全部附件文件，不可恢复） |
 | `GET` | `/api/attachments/{id}` | 会话 Cookie | 预览 / 下载附件（白名单类型 inline，其余强制下载；`?download=1` 强制下载） |
 | `POST` | `/api/assignments/{id}/requeue` | 会话 Cookie | 把疑似卡住的 delivered 指派重置回 pending |
-| `GET` | `/api/taskloop-prompt` | 会话 Cookie | 生成老 Agent 的升级指令（引导重跑 setup.sh，不含密钥） |
-| `GET` | `/api/decommission-prompt` | 会话 Cookie | 生成老 Agent（v0.7 之前）的手动下线指令（不含密钥） |
 | `GET` | `/healthz` | 无 | 健康检查 |
 
 ## 定位与边界

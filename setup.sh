@@ -27,7 +27,6 @@ case "$AM_URL" in *"{{"*) die "AM_URL 未设置：请通过 GET /setup.sh 下载
 
 command -v curl >/dev/null 2>&1 || die "需要 curl"
 mkdir -p "$DIR" && chmod 700 "$DIR"
-rm -f "$DIR/inbox.jsonl"   # 清理 v0.4 旧机制残留（如存在）
 
 # ---- 1) 注册（已有配置则跳过） ----
 if [ -s "$CFG" ]; then

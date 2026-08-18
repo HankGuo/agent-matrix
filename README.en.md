@@ -89,7 +89,6 @@ Runner reliability: a directory lock prevents re-entry (tasks run serially; late
 - **Collection**: the agent is told to write output files into `…/out/`; the runner uploads them after execution, and the detail page groups them per assignment
 - **Storage**: the default `local` driver streams bytes to `AGENT_MATRIX_ATTACH_DIR` (default: `attachments/` next to the DB), writes via temp-file + rename, and serves downloads with Range support (media scrubbing works); `AGENT_MATRIX_STORAGE` reserves an `s3` extension point (presigned direct transfer, not implemented yet)
 - **Security**: an agent can only download input files of tasks assigned to it; output uploads require a delivered assignment; the stored MIME is server-sniffed (client claims are not trusted); everything is served `attachment` by default, with inline preview only for an image/audio/video/PDF allowlist (plus a CSP sandbox); deleting a task or an agent cascades to its files
-- **Note**: attachments require agent-side runner v0.6+ — older agents upgrade by re-running `setup.sh` (see "Upgrading")
 
 ### Assignment state machine
 
@@ -136,8 +135,6 @@ sequenceDiagram
     A->>S: GET /api/tasks (WebUI polls status & results every 15s)
 ```
 
-> Agents enrolled earlier run an outdated runner (or the v0.4 inbox loop): generate the **upgrade prompt** under WebUI "设置" (Settings) and send it to them — it simply tells the agent to **re-run the same `setup.sh`** (idempotent: existing config skips registration, only scripts and scheduler get refreshed). No re-registration, no secrets.
-
 ## Sample onboarding prompt
 
 This is what the WebUI generates (verbatim real output, Chinese by design — it is written for the *agent* to follow, not for a human to read). Copy and paste it to the target agent as-is:
@@ -181,11 +178,11 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 
 ## Features
 
-- **Prompt guidance + hosted installer**: the prompt is a dozen lines of guidance; all static logic lives in the server-hosted idempotent `setup.sh` — change the logic without touching prompts, and old agents upgrade by simply re-running it
+- **Prompt guidance + hosted installer**: the prompt is a dozen lines of guidance; all static logic lives in the server-hosted idempotent `setup.sh` — change the logic without touching prompts, and re-running it upgrades the agent to the latest runner
 - **Task dispatch (text + attachments)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; attachments ship with the task and outputs are collected automatically; stuck assignments can be manually requeued
 - **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
 - **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
-- **One-click decommission**: the agent vanishes from the list immediately; its token hash moves to a tombstone table (kept 30 days), and its next heartbeat gets a 410 that triggers self-uninstall (scheduler removed, `~/.agent-matrix` deleted; deferred while the runner is busy; a powered-off machine still cleans up on its first heartbeat after boot). For agents enrolled before v0.7, generate a manual decommission prompt under Settings
+- **One-click decommission**: the agent vanishes from the list immediately; its token hash moves to a tombstone table (kept 30 days), and its next heartbeat gets a 410 that triggers self-uninstall (scheduler removed, `~/.agent-matrix` deleted; deferred while the runner is busy; a powered-off machine still cleans up on its first heartbeat after boot)
 - **Pure WebUI**: the control machine needs nothing but a browser; status dots and task progress auto-refresh every 15s
 - **Cross-platform heartbeat**: the installer auto-detects Linux (cron / systemd user timer) and macOS (launchd), and prints manual instructions elsewhere
 - **Reliable deployment**: one static binary + one SQLite file under systemd; graceful shutdown, rate limiting, and security headers built in
@@ -269,11 +266,10 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # or 
 
 All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never wipes it, and startup runs `CREATE TABLE IF NOT EXISTS` so tables introduced by a new version appear automatically. **Don't delete the database to "start fresh"** — that discards the admin account, every agent credential, and all task history.
 
-**Enrolled agents**: `setup.sh` is idempotent — re-running it upgrades the agent to the latest runner (existing config skips registration; the heartbeat credential is unchanged, only scripts and the scheduler are refreshed). Pick any of three triggers:
+**Enrolled agents**: `setup.sh` is idempotent — re-running it upgrades the agent to the latest runner (existing config skips registration; the heartbeat credential is unchanged, only scripts and the scheduler are refreshed). Pick either trigger:
 
-1. WebUI "设置" → generate the upgrade prompt → send it to the agent (it simply tells the agent to re-run setup.sh)
-2. Dispatch a self-upgrade task @ the target agents: "run `curl -fsS <base-url>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` and report the last line" — script writes are atomic (temp file + mv), so the runner replacing itself mid-run is safe
-3. If you have SSH: `curl -fsS <base-url>/setup.sh | sh`
+1. Dispatch a self-upgrade task @ the target agents: "run `curl -fsS <base-url>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` and report the last line" — script writes are atomic (temp file + mv), so the runner replacing itself mid-run is safe
+2. If you have SSH: `curl -fsS <base-url>/setup.sh | sh`
 
 ## API summary
 
@@ -299,8 +295,6 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `POST` | `/api/tasks/{id}/delete` | session cookie | Delete task (cascades to assignments, results and all attachment files; irreversible) |
 | `GET` | `/api/attachments/{id}` | session cookie | Preview / download an attachment (allowlisted types inline, others forced download; `?download=1` forces download) |
 | `POST` | `/api/assignments/{id}/requeue` | session cookie | Reset a suspected-stuck delivered assignment to pending |
-| `GET` | `/api/taskloop-prompt` | session cookie | Upgrade prompt for older agents (re-run setup.sh; no secrets) |
-| `GET` | `/api/decommission-prompt` | session cookie | Manual decommission prompt for pre-v0.7 agents (no secrets) |
 | `GET` | `/healthz` | none | Health check |
 
 ## Scope

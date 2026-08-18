@@ -270,7 +270,7 @@ function td(text) {
 }
 
 async function removeAgent(a) {
-  if (!confirm(`确定下线 Agent「${a.name}」(${a.id})？\n\n它会立即从列表消失。v0.7+ 的 Agent 一分钟左右收到信号并自动卸载本机配置；更早版本请到「设置 → 手动下线老 Agent」生成指令发给它。`)) return;
+  if (!confirm(`确定下线 Agent「${a.name}」(${a.id})？\n\n它会立即从列表消失，并在一分钟左右收到信号、自动卸载本机的定时任务与配置。`)) return;
   const res = await api("/api/agents/" + encodeURIComponent(a.id), { method: "DELETE" });
   if (res.ok) loadAgents();
 }
@@ -823,58 +823,6 @@ $("#btnCancelTask").addEventListener("click", async () => {
     openTaskDetail(currentTaskId);
     loadTasks();
   }
-});
-
-/* 老 Agent 补充任务能力指令 */
-$("#btnTaskLoop").addEventListener("click", async () => {
-  const res = await api("/api/taskloop-prompt");
-  if (!res.ok) return;
-  const data = await res.json();
-  $("#taskLoopText").textContent = data.prompt;
-  $("#taskLoopBox").hidden = false;
-  $("#btnTaskLoop").hidden = true;
-});
-
-$("#btnCopyTaskLoop").addEventListener("click", async () => {
-  const btn = $("#btnCopyTaskLoop");
-  try {
-    await navigator.clipboard.writeText($("#taskLoopText").textContent);
-    btn.textContent = "已复制 ✓";
-  } catch {
-    const range = document.createRange();
-    range.selectNodeContents($("#taskLoopText"));
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    btn.textContent = "已选中，请按 ⌘C";
-  }
-  setTimeout(() => (btn.textContent = "复制指令"), 2000);
-});
-
-/* 老 Agent 手动下线指令 */
-$("#btnDecom").addEventListener("click", async () => {
-  const res = await api("/api/decommission-prompt");
-  if (!res.ok) return;
-  const data = await res.json();
-  $("#decomText").textContent = data.prompt;
-  $("#decomBox").hidden = false;
-  $("#btnDecom").hidden = true;
-});
-
-$("#btnCopyDecom").addEventListener("click", async () => {
-  const btn = $("#btnCopyDecom");
-  try {
-    await navigator.clipboard.writeText($("#decomText").textContent);
-    btn.textContent = "已复制 ✓";
-  } catch {
-    const range = document.createRange();
-    range.selectNodeContents($("#decomText"));
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    btn.textContent = "已选中，请按 ⌘C";
-  }
-  setTimeout(() => (btn.textContent = "复制指令"), 2000);
 });
 
 /* ---- 启动：探测会话与初始化状态 ---- */
