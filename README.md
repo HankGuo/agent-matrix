@@ -246,6 +246,22 @@ WantedBy=multi-user.target
 
 > 注意：目标 Agent 必须具备**执行 shell 命令和创建定时任务**的能力。只能对话、无法执行命令的 Agent（例如某些厂商托管的 IM 机器人）无法自行接入——这是机制决定的，不是配置问题。
 
+## 升级
+
+**服务端**：替换二进制再重启即可，数据不动。
+
+```bash
+git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或你的重启方式
+```
+
+所有状态都在 `AGENT_MATRIX_DB` 指向的单个 SQLite 文件里，重启不清空；启动时自动 `CREATE TABLE IF NOT EXISTS`，新版本需要的表自动建好。**不要删库重来**——删库会丢掉管理员账号、所有 Agent 凭证与任务历史。
+
+**已接入的 Agent**：`setup.sh` 幂等，重跑一遍即升级到最新执行器（已有 config 自动跳过注册，心跳凭证不变，只更新脚本与定时任务）。三种触发方式任选：
+
+1. WebUI「设置」→「生成补充指令」→ 发给该 Agent（指令内容就是引导它重跑 setup.sh）
+2. 直接派发一个自升级任务 @ 目标 Agent：内容写「执行 `curl -fsS <平台地址>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` 并汇报最后一行」——脚本写入是原子替换（临时文件 + mv），正在运行的执行器不会错乱
+3. 能 SSH 的话就手动：`curl -fsS <平台地址>/setup.sh | sh`
+
 ## API 速览
 
 | 方法 | 路径 | 鉴权 | 说明 |

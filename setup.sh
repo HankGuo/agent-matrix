@@ -60,15 +60,18 @@ chmod 600 "$CFG"
 say "== 执行器: $RUN_TASK"
 
 # ---- 3) 心跳脚本 ----
-cat > "$DIR/heartbeat.sh" <<'EOF'
+# 临时文件 + mv 原子替换：本脚本可能被「自升级任务」触发，此时 heartbeat.sh / task-runner.sh
+# 可能正在运行；直接 cat > 截断改写会让运行中的 sh 实例读到错乱内容，mv 换 inode 则安全。
+cat > "$DIR/.heartbeat.sh.tmp" <<'EOF'
 #!/bin/sh
 . "$HOME/.agent-matrix/config"
 curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" >/dev/null 2>&1 || true
 EOF
+mv -f "$DIR/.heartbeat.sh.tmp" "$DIR/heartbeat.sh"
 
 # ---- 4) 任务执行器 ----
 # 目录锁串行防重入；拉取 → eval AM_RUN_TASK 执行 → 按退出码机械回写。
-cat > "$DIR/task-runner.sh" <<'EOF'
+cat > "$DIR/.task-runner.sh.tmp" <<'EOF'
 #!/bin/sh
 # task-runner.sh：拉取平台任务并执行，机械回写结果（由 Agent Matrix setup.sh 生成）
 lockdir="$HOME/.agent-matrix/runner.lock"
@@ -100,6 +103,7 @@ for t in json.load(sys.stdin).get("tasks", []):
     -d "$payload" || true
 done
 EOF
+mv -f "$DIR/.task-runner.sh.tmp" "$DIR/task-runner.sh"
 
 chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh"
 command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 的 JSON 解析依赖它（或自行改用 jq 重写）"

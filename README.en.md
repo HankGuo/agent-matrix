@@ -246,6 +246,22 @@ WantedBy=multi-user.target
 
 > Note: the target agent must be able to **run shell commands and create scheduled jobs**. A chat-only agent (e.g. some vendor-hosted IM bots) cannot onboard itself — that's a mechanical constraint, not a configuration issue.
 
+## Upgrading
+
+**Server**: replace the binary and restart — data is untouched.
+
+```bash
+git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # or your restart method
+```
+
+All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never wipes it, and startup runs `CREATE TABLE IF NOT EXISTS` so tables introduced by a new version appear automatically. **Don't delete the database to "start fresh"** — that discards the admin account, every agent credential, and all task history.
+
+**Enrolled agents**: `setup.sh` is idempotent — re-running it upgrades the agent to the latest runner (existing config skips registration; the heartbeat credential is unchanged, only scripts and the scheduler are refreshed). Pick any of three triggers:
+
+1. WebUI "设置" → generate the upgrade prompt → send it to the agent (it simply tells the agent to re-run setup.sh)
+2. Dispatch a self-upgrade task @ the target agents: "run `curl -fsS <base-url>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` and report the last line" — script writes are atomic (temp file + mv), so the runner replacing itself mid-run is safe
+3. If you have SSH: `curl -fsS <base-url>/setup.sh | sh`
+
 ## API summary
 
 | Method | Path | Auth | Description |
