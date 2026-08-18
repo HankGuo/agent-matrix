@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -86,6 +87,14 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func (s *server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "time": time.Now().Unix(), "version": version})
+}
+
+// handleSetupScript 下发一键接入脚本。公开接口：脚本本身不含任何密钥，
+// 令牌由 Agent 在执行时通过环境变量传入。
+func (s *server) handleSetupScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, strings.ReplaceAll(setupScript, "{{BASE_URL}}", s.baseURL()))
 }
 
 // ---- 公开接口（Agent 侧） ----

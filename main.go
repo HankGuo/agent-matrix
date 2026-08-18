@@ -16,10 +16,13 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.5.0"
+const version = "0.5.1"
 
 //go:embed all:web
 var webFS embed.FS
+
+//go:embed setup.sh
+var setupScript string
 
 func main() {
 	cfg, err := loadConfig()
@@ -82,6 +85,7 @@ func (s *server) routes() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /setup.sh", s.handleSetupScript)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
