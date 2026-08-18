@@ -119,10 +119,33 @@ func (s *server) handlePullTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 附带输入件清单（拉取现场组装相对下载 URL，Agent 用 Bearer 令牌下载）
+	ids := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		ids = append(ids, t.TaskID)
+	}
+	attMap, err := s.store.inputAttachmentsForTasks(ids)
+	if err != nil {
+		log.Printf("查询任务附件失败 (%s): %v", a.ID, err)
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	type pullView struct {
+		pulledTask
+		Attachments []attachmentView `json:"attachments,omitempty"`
+	}
+	out := make([]pullView, 0, len(tasks))
+	for _, t := range tasks {
+		v := pullView{pulledTask: t}
+		for i := range attMap[t.TaskID] {
+			v.Attachments = append(v.Attachments, attViewOf(&attMap[t.TaskID][i]))
+		}
+		out = append(out, v)
+	}
 	if len(tasks) > 0 {
 		log.Printf("Agent %s 拉取了 %d 个任务", a.ID, len(tasks))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks, "server_time": time.Now().Unix()})
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": out, "server_time": time.Now().Unix()})
 }
 
 // handleWriteResult 回写执行结果：仅允许对自己的 delivered 指派写一次。
@@ -169,53 +192,91 @@ func (s *server) handleWriteResult(w http.ResponseWriter, r *http.Request) {
 // ---- 管理端接口 ----
 
 // handleCreateTask 创建任务并 @ 一个或多个 Agent。
+// 支持两种请求体：JSON（纯文本任务）；multipart/form-data（带附件，
+// 字段 title / content / agent_ids / desc×N / file×N，desc 与 file 按顺序配对）。
 func (s *server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Title    string   `json:"title"`
-		Content  string   `json:"content"`
-		AgentIDs []string `json:"agent_ids"`
+	var (
+		title, content string
+		agentIDs       []string
+		files          []incomingFile
+	)
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		var ok bool
+		title, content, agentIDs, files, ok = s.parseTaskMultipart(w, r)
+		if !ok {
+			return
+		}
+	} else {
+		var req struct {
+			Title    string   `json:"title"`
+			Content  string   `json:"content"`
+			AgentIDs []string `json:"agent_ids"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		title, content, agentIDs = req.Title, req.Content, req.AgentIDs
 	}
-	if !decodeJSON(w, r, &req) {
-		return
+	// 出错清理：附件已落盘但任务未建成时删除临时文件
+	cleanupFiles := func() {
+		for _, f := range files {
+			_ = s.blob.Delete(f.key)
+		}
 	}
-	req.Title = clean(req.Title, titleMax)
-	req.Content = strings.TrimSpace(req.Content)
-	if req.Title == "" || req.Content == "" {
+	title = clean(title, titleMax)
+	content = strings.TrimSpace(content)
+	if title == "" || content == "" {
+		cleanupFiles()
 		writeError(w, http.StatusBadRequest, "标题和内容不能为空")
 		return
 	}
-	if len(req.Content) > contentMax {
+	if len(content) > contentMax {
+		cleanupFiles()
 		writeError(w, http.StatusBadRequest, "内容不能超过 16KB")
 		return
 	}
 	seen := map[string]bool{}
-	ids := make([]string, 0, len(req.AgentIDs))
-	for _, id := range req.AgentIDs {
-		if !seen[id] && strings.HasPrefix(id, "am_") {
-			seen[id] = true
-			ids = append(ids, id)
+	ids := make([]string, 0, len(agentIDs))
+	for _, id := range agentIDs {
+		for _, one := range strings.Split(id, ",") { // multipart 表单允许逗号合并
+			one = strings.TrimSpace(one)
+			if !seen[one] && strings.HasPrefix(one, "am_") {
+				seen[one] = true
+				ids = append(ids, one)
+			}
 		}
 	}
 	if len(ids) == 0 || len(ids) > maxAssignees {
+		cleanupFiles()
 		writeError(w, http.StatusBadRequest, "请选择 1-20 个 Agent")
 		return
 	}
 	ok, err := s.store.agentsExist(ids)
 	if err != nil {
+		cleanupFiles()
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
 	if !ok {
+		cleanupFiles()
 		writeError(w, http.StatusBadRequest, "包含不存在的 Agent")
 		return
 	}
-	t, err := s.store.createTask(req.Title, req.Content, ids)
+	t, err := s.store.createTask(title, content, ids)
 	if err != nil {
+		cleanupFiles()
 		log.Printf("创建任务失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	log.Printf("任务已创建: %s %q，指派给 %d 个 Agent", t.ID, t.Title, len(ids))
+	if err := s.saveInputAttachments(t.ID, files); err != nil {
+		_, _ = s.store.deleteTask(t.ID)
+		cleanupFiles()
+		log.Printf("登记附件失败: %v", err)
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	log.Printf("任务已创建: %s %q，指派给 %d 个 Agent，附件 %d 个", t.ID, t.Title, len(ids), len(files))
 	writeJSON(w, http.StatusCreated, map[string]any{"task": t})
 }
 
@@ -262,10 +323,27 @@ func (s *server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	as := assigns[id]
+	// 附件：输入件平铺列出，产出件按指派分组
+	atts, err := s.store.taskAttachments(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	inputs := []Attachment{}
+	outputs := map[string][]Attachment{}
+	for _, a := range atts {
+		if a.Kind == AttIn {
+			inputs = append(inputs, a)
+		} else {
+			outputs[a.AssignmentID] = append(outputs[a.AssignmentID], a)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"task":        t,
 		"status":      aggregateStatus(t, as),
 		"assignments": s.assignmentViews(as, true),
+		"inputs":      inputs,
+		"outputs":     outputs,
 	})
 }
 

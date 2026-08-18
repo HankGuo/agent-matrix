@@ -1,17 +1,5 @@
-# 构建产物与本地数据
+attachments/
+*.db
+*.db-shm
+*.db-wal
 agent-matrix
-agent-matrix.db
-agent-matrix.db-wal
-agent-matrix.db-shm
-*.test
-
-# 系统杂项
-.DS_Store
-
-# 编辑器
-.idea/
-.vscode/
-
-# 本机调试
-visual.db*
-dev-local.db*

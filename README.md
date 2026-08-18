@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给任意具备 shell 执行能力的 Agent（Claude Code / Kimi CLI / Codex / OpenClaw / Hermes……），Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发纯文本任务：Agent 复用心跳凭证自行拉取、在自己的通道里执行（OpenClaw / Hermes / 本地工具皆可），再把结果写回。
+轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给任意具备 shell 执行能力的 Agent（Claude Code / Kimi CLI / Codex / OpenClaw / Hermes……），Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（OpenClaw / Hermes / 本地工具皆可），再把结果与产出文件写回。
 
 单二进制 + 嵌入式 SQLite + 内嵌 WebUI，**零外部运行时依赖**。
 
@@ -77,11 +77,19 @@ sequenceDiagram
     S-->>A: 在线状态（最后心跳 ≤ 3 分钟判定在线）
 ```
 
-## 任务派发（纯文本）
+## 任务派发（文本 + 附件）
 
-管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 kimi → claude → openclaw → hermes 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
+管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent，可携带最多 10 个附件（单个 ≤100MB，每个附件可单独填一句说明）。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 kimi → claude → openclaw → hermes 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
 
 执行器脚本的可靠性设计：目录锁防重入（任务串行执行，一个没跑完后续轮次自动跳过）、显式补全窄调度环境的 PATH、结果截取尾部 30KB 写回。
+
+### 附件链路
+
+- **下发**：Agent 拉到任务时，附件以「序号-文件名」落盘到 `~/.agent-matrix/files/<任务ID>/in/`，清单（编号 + 路径 + 说明）自动注入给执行器的提示词——任务正文里写「对比附件1和附件2」不会张冠李戴。附件目录可用 `AM_FILES_DIR` 自定义
+- **回收**：Agent 被告知把产出文件写到 `…/out/` 目录，执行结束后 runner 自动上传，详情页按指派分组展示
+- **存储**：默认 `local` 驱动，字节落在 `AGENT_MATRIX_ATTACH_DIR`（默认与数据库同级的 `attachments/`），流式读写、先写临时文件再 rename、下载支持 Range（音视频可拖进度条）；`AGENT_MATRIX_STORAGE` 预留 `s3` 扩展点（预签名直传，尚未实现）
+- **安全**：Agent 只能下载自己被指派任务的输入件；产出上传仅限 delivered 状态的指派；MIME 以服务端嗅探为准（客户端声明不可信）；默认强制下载，仅图片/音频/视频/PDF 白名单允许 inline 预览（且加 CSP sandbox）；删除任务/Agent 时级联清理文件
+- **注意**：附件能力要求 Agent 侧执行器为 v0.6+，老 Agent 重跑一遍 `setup.sh` 即升级（见「升级」）
 
 ### 指派状态机
 
@@ -116,12 +124,14 @@ sequenceDiagram
     participant S as Agent Matrix Server
     participant G as Agent（自治执行）
 
-    A->>S: POST /api/tasks（标题 + 内容 + @ 1~20 个 Agent）
+    A->>S: POST /api/tasks（标题 + 内容 + 附件 + @ 1~20 个 Agent）
     loop 每分钟（task-runner.sh，目录锁防重入）
         G->>S: GET /api/agent/tasks（Bearer amh_…）
-        S-->>G: 属于它的任务（原子置 delivered）
+        S-->>G: 属于它的任务（原子置 delivered）+ 附件清单
+        G->>S: GET /api/agent/attachments/{id}（下载输入件到本机）
     end
-    G->>G: 调 Agent 的一次性 CLI 命令执行（kimi -p / claude -p / …）
+    G->>G: 调 Agent 的一次性 CLI 命令执行（kimi -p / claude -p / …，提示词内含附件清单与产出目录）
+    G->>S: POST /api/agent/tasks/{assignment_id}/outputs（上传产出文件，0~N 个）
     G->>S: POST /api/agent/tasks/{assignment_id}/result（按退出码 done/failed + 输出尾部）
     A->>S: GET /api/tasks（WebUI 每 15s 轮询状态与结果）
 ```
@@ -172,7 +182,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 ## 特性
 
 - **提示词引导 + 托管安装脚本**：提示词只有十几行引导；静态逻辑收敛到服务器托管的幂等 `setup.sh`，改逻辑不用改提示词，老 Agent 重跑一遍即升级
-- **纯文本任务派发**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；卡住的指派可手动重新投递
+- **任务派发（文本 + 附件）**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；附件随任务下发、产出自动回收；卡住的指派可手动重新投递
 - **首次访问强制初始化**：无任何账号时 WebUI 只开放初始化页，密码 PBKDF2-SHA256 加盐存储
 - **一次性注册令牌**：24 小时有效、只用一次；注册后换发独立心跳令牌，数据库只存哈希
 - **纯 WebUI**：管理端只需要浏览器；15 秒自动刷新状态灯与任务进度
@@ -210,6 +220,8 @@ export AGENT_MATRIX_BASE_URL='https://matrix.example.com'  # 对外地址，写�
 | `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite 数据库路径 |
 | `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | 对外访问地址，用于生成接入指令。部署后也可在 WebUI「设置」里修改，**WebUI 设置优先于环境变量** |
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | 超过该时长无心跳判定离线 |
+| `AGENT_MATRIX_STORAGE` | `local` | 附件存储驱动。`local` 落盘本机目录；`s3`（预签名直传）为预留扩展点，尚未实现 |
+| `AGENT_MATRIX_ATTACH_DIR` | `<DB目录>/attachments` | local 驱动的附件存储目录（挂载点），备份时随 DB 一起拷贝 |
 | `AGENT_MATRIX_ADMIN_TOKEN` | 空（可选） | 应急登录令牌。设置后登录页可用它替代账号密码；用于忘记密码等场景，不设置则只有账号密码一条路 |
 
 ### 生产部署建议
@@ -269,8 +281,10 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `GET` | `/setup.sh` | 无 | 下载一键接入/升级脚本（不含密钥，`{{BASE_URL}}` 已注入） |
 | `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌 |
 | `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（可选携带 `meta` JSON） |
-| `GET` | `/api/agent/tasks` | `Bearer amh_…` | Agent 拉取自己的待执行任务（事务内原子置 delivered，不重复投递） |
+| `GET` | `/api/agent/tasks` | `Bearer amh_…` | Agent 拉取自己的待执行任务（事务内原子置 delivered，不重复投递），响应含附件清单 |
 | `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | 回写执行结果（`status`: done/failed + `result` ≤32KB，仅 delivered 状态可写一次） |
+| `GET` | `/api/agent/attachments/{id}` | `Bearer amh_…` | 下载输入件（仅限自己被指派过的任务） |
+| `POST` | `/api/agent/tasks/{id}/outputs` | `Bearer amh_…` | 上传产出文件（multipart，单文件，可多次调用；仅 delivered 状态） |
 | `GET` | `/api/auth/status` | 无 | 查询是否需要初始化、是否启用应急令牌 |
 | `POST` | `/api/setup` | 仅未初始化时可用 | 首次访问创建管理员账号 |
 | `POST` | `/api/login` | 账号密码 / 应急令牌 | WebUI 登录，种会话 Cookie |
@@ -278,16 +292,18 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `POST` | `/api/enrollments` | 会话 Cookie | 生成一次性令牌 + 精简接入指令 |
 | `GET` / `POST` | `/api/settings` | 会话 Cookie | 读取 / 修改平台地址 |
 | `DELETE` | `/api/agents/{id}` | 会话 Cookie | 删除 Agent（其未结束指派自动置 canceled） |
-| `POST` | `/api/tasks` | 会话 Cookie | 创建任务并 @ 1-20 个 Agent（标题 ≤120 字，内容 ≤16KB） |
-| `GET` | `/api/tasks`、`/api/tasks/{id}` | 会话 Cookie | 任务列表 / 详情（详情含各指派结果全文） |
+| `POST` | `/api/tasks` | 会话 Cookie | 创建任务并 @ 1-20 个 Agent（JSON 纯文本，或 multipart 带 ≤10 个附件，每个 ≤100MB、可带说明） |
+| `GET` | `/api/tasks`、`/api/tasks/{id}` | 会话 Cookie | 任务列表 / 详情（详情含各指派结果全文与附件清单） |
 | `POST` | `/api/tasks/{id}/cancel` | 会话 Cookie | 取消任务（未结束指派全部置 canceled） |
+| `POST` | `/api/tasks/{id}/delete` | 会话 Cookie | 删除任务（级联删除指派、结果与全部附件文件，不可恢复） |
+| `GET` | `/api/attachments/{id}` | 会话 Cookie | 预览 / 下载附件（白名单类型 inline，其余强制下载；`?download=1` 强制下载） |
 | `POST` | `/api/assignments/{id}/requeue` | 会话 Cookie | 把疑似卡住的 delivered 指派重置回 pending |
 | `GET` | `/api/taskloop-prompt` | 会话 Cookie | 生成老 Agent 的升级指令（引导重跑 setup.sh，不含密钥） |
 | `GET` | `/healthz` | 无 | 健康检查 |
 
 ## 定位与边界
 
-Agent Matrix 做**注册表 + 在线状态 + 纯文本任务直达**。任务模型刻意简单：一次派发、一次执行、一次回写——没有 DAG 编排、没有自动重试、暂不支持附件（下一阶段）。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话送到、把结果收回来」，编排平台负责「多步流程」。
+Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**。任务模型刻意简单：一次派发、一次执行、一次回写——没有 DAG 编排、没有自动重试。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话和这些文件送到、把结果收回来」，编排平台负责「多步流程」。
 
 ## License
 

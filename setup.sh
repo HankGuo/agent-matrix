@@ -70,7 +70,8 @@ EOF
 mv -f "$DIR/.heartbeat.sh.tmp" "$DIR/heartbeat.sh"
 
 # ---- 4) 任务执行器 ----
-# 目录锁串行防重入；拉取 → eval AM_RUN_TASK 执行 → 按退出码机械回写。
+# shell 外壳负责目录锁/PATH/配置；主体逻辑在 python3 内嵌脚本里：
+# 拉取 → 下载附件并生成编号清单 → eval AM_RUN_TASK 执行 → 回收产出文件上传 → 按退出码机械回写。
 cat > "$DIR/.task-runner.sh.tmp" <<'EOF'
 #!/bin/sh
 # task-runner.sh：拉取平台任务并执行，机械回写结果（由 Agent Matrix setup.sh 生成）
@@ -83,30 +84,104 @@ PATH="$HOME/.kimi-code/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin
 export PATH
 
 . "$HOME/.agent-matrix/config"
+export AM_URL AM_HB_TOKEN AM_RUN_TASK
+AM_FILES_DIR="${AM_FILES_DIR:-$HOME/.agent-matrix/files}"
+export AM_FILES_DIR
 
-run_task() {
-  # AM_RUN_TASK 在 config 里配置，$1=任务内容，$2=任务ID（tsk_…，按任务维持会话时用）
-  eval "$AM_RUN_TASK"
-}
+python3 - <<'PYEOF'
+import json, os, re, shutil, subprocess, sys, urllib.request
 
-resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
-printf '%s' "$resp" | python3 -c '
-import sys, json, base64
-for t in json.load(sys.stdin).get("tasks", []):
-    print(t["assignment_id"] + " " + t["task_id"] + " " + base64.b64encode(t["content"].encode()).decode())
-' | while read -r aid tid b64; do
-  content=$(printf '%s' "$b64" | base64 -d)
-  output=$(run_task "$content" "$tid" 2>&1) && st=done || st=failed
-  payload=$(python3 -c 'import sys,json;print(json.dumps({"status":sys.argv[1],"result":sys.argv[2][-30000:]}))' "$st" "$output")
-  curl -fsS -m 30 -X POST "$AM_URL/api/agent/tasks/$aid/result" \
-    -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
-    -d "$payload" || true
-done
+AM_URL = os.environ["AM_URL"].rstrip("/")
+TOK = os.environ["AM_HB_TOKEN"]
+FILES = os.environ.get("AM_FILES_DIR") or os.path.expanduser("~/.agent-matrix/files")
+HDR = {"Authorization": "Bearer " + TOK}
+
+def api(method, path, obj=None, timeout=40):
+    data, h = None, dict(HDR)
+    if obj is not None:
+        data = json.dumps(obj).encode()
+        h["Content-Type"] = "application/json"
+    req = urllib.request.Request(AM_URL + path, data=data, headers=h, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode() or "{}")
+
+def sanitize(name):
+    # 落盘文件名清洗：去路径分隔符与控制字符，限长，防空名
+    name = re.sub(r"[\x00-\x1f/\\]", "_", (name or "").strip())
+    return name[:80] or "file"
+
+def human(n):
+    return "%.1f MB" % (n / 1048576) if n >= 1048576 else "%.0f KB" % (n / 1024)
+
+try:
+    resp = api("GET", "/api/agent/tasks", timeout=20)
+except Exception:
+    sys.exit(0)  # 拉取失败（网络抖动等）本轮放弃，下一分钟再来
+
+for t in resp.get("tasks", []):
+    aid, tid = t["assignment_id"], t["task_id"]
+    indir = os.path.join(FILES, tid, "in")
+    outdir = os.path.join(FILES, tid, "out")
+    os.makedirs(outdir, exist_ok=True)
+
+    # 附件：下载为「序号-文件名」，清单编号/路径/描述三重锚定，注入给执行器的提示词
+    manifest = ""
+    atts = t.get("attachments") or []
+    if atts:
+        os.makedirs(indir, exist_ok=True)
+        lines = ["", "", "## 附件清单（共 %d 个，已下载到本机）" % len(atts)]
+        for i, a in enumerate(atts, 1):
+            fpath = os.path.join(indir, "%02d-%s" % (i, sanitize(a.get("name"))))
+            try:
+                req = urllib.request.Request(AM_URL + a["url"], headers=HDR)
+                with urllib.request.urlopen(req, timeout=300) as r, open(fpath, "wb") as f:
+                    shutil.copyfileobj(r, f)
+            except Exception as e:
+                fpath = "（下载失败: %s）" % e
+            lines.append("[附件%d] %s（%s）" % (i, a.get("name", ""), human(a.get("size") or 0)))
+            lines.append("    路径: " + fpath)
+            if a.get("description"):
+                lines.append("    说明: " + a["description"])
+        lines.append("请按编号引用附件（如「附件1」），用你可用的工具读取/提取内容；路径不可读或下载失败要如实回报，不要编造内容。")
+        manifest = "\n".join(lines)
+
+    prompt = t["content"] + manifest
+    prompt += "\n\n## 产出\n如需产出文件，请写入目录 %s （执行结束后会被自动回收上传），并在结果文本中按文件名引用说明。" % outdir
+
+    # AM_RUN_TASK 是 config 里的一次性非交互执行命令：$1=任务内容 $2=任务ID（tsk_…）
+    p = subprocess.run(["/bin/sh", "-c", 'eval "$AM_RUN_TASK"', "run_task", prompt, tid],
+                       env=dict(os.environ), stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True, errors="replace")
+    output = p.stdout or ""
+    st = "done" if p.returncode == 0 else "failed"
+
+    # 回收产出目录：逐个上传，失败不阻断结果回写
+    uploaded = []
+    for fn in sorted(os.listdir(outdir)):
+        fp = os.path.join(outdir, fn)
+        if not os.path.isfile(fp):
+            continue
+        r = subprocess.run(["curl", "-fsS", "-m", "300", "-X", "POST",
+                            AM_URL + "/api/agent/tasks/" + aid + "/outputs",
+                            "-H", "Authorization: Bearer " + TOK,
+                            "-F", "file=@" + fp],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            uploaded.append(fn)
+    if uploaded:
+        output += "\n\n[已回收产出文件: " + ", ".join(uploaded) + "]"
+
+    try:
+        api("POST", "/api/agent/tasks/" + aid + "/result",
+            {"status": st, "result": output[-30000:]})
+    except Exception:
+        pass
+PYEOF
 EOF
 mv -f "$DIR/.task-runner.sh.tmp" "$DIR/task-runner.sh"
 
 chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh"
-command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 的 JSON 解析依赖它（或自行改用 jq 重写）"
+command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 整体依赖它"
 
 # ---- 5) 每分钟定时任务（heartbeat.sh 与 task-runner.sh 各一条） ----
 SCHED="manual"

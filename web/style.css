@@ -571,3 +571,19 @@ textarea:focus {
   .txt-full { display: none; }
   .txt-short { display: inline; }
 }
+
+/* ---- 附件 ---- */
+.btn.danger-ghost { color: var(--muted); font-size: 12.5px; padding: 5px 10px; }
+.btn.danger-ghost:hover { color: var(--danger); background: #f7ecea; }
+.att-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.att-row .att-desc { flex: 1; min-width: 0; }
+.att-name { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.att-rm { flex-shrink: 0; }
+.att-item { margin-top: 10px; border-top: 1px dashed var(--line, #e3e0d8); padding-top: 8px; }
+.att-item-head { display: flex; align-items: center; gap: 8px; }
+.att-item-head .att-name { flex: 1; max-width: none; font-weight: 600; }
+.att-dl { flex-shrink: 0; }
+.att-desc-view { margin-top: 2px; }
+.att-preview { display: block; margin-top: 8px; max-width: 100%; max-height: 260px; border-radius: 8px; }
+.att-media { display: block; margin-top: 8px; width: 100%; max-height: 260px; border-radius: 8px; }
+.att-out-head { margin-top: 10px; }

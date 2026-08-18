@@ -2,7 +2,7 @@
 
 [中文文档](README.md)
 
-A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to any agent with shell access (Claude Code, Kimi CLI, Codex, OpenClaw, Hermes…). Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a plain-text task: the agent pulls it on its own using the heartbeat credential, executes it in whatever channel it has (OpenClaw / Hermes / local tools), and writes the result back.
+A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to any agent with shell access (Claude Code, Kimi CLI, Codex, OpenClaw, Hermes…). Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in whatever channel it has (OpenClaw / Hermes / local tools), and writes the result — plus any output files — back.
 
 Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
 
@@ -77,11 +77,19 @@ sequenceDiagram
     S-->>A: online status (last heartbeat ≤ 3 min ⇒ online)
 ```
 
-## Task dispatch (plain text)
+## Task dispatch (text + attachments)
 
-The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents. On each agent machine, `task-runner.sh` pulls tasks every minute, **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order kimi → claude → openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
+The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents, optionally with up to 10 attachments (≤100MB each, each with its own caption). On each agent machine, `task-runner.sh` pulls tasks every minute, **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order kimi → claude → openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
 
 Runner reliability: a directory lock prevents re-entry (tasks run serially; later ticks skip while one is running), the narrow scheduler PATH is augmented explicitly, and the result written back is the last 30KB of output.
+
+### Attachment pipeline
+
+- **Delivery**: when an agent pulls a task, attachments land at `~/.agent-matrix/files/<task-id>/in/` as `<index>-<filename>`; a manifest (index + path + caption) is injected into the executor prompt, so "compare 附件1 and 附件2" in the task body maps unambiguously. Override the base dir with `AM_FILES_DIR`
+- **Collection**: the agent is told to write output files into `…/out/`; the runner uploads them after execution, and the detail page groups them per assignment
+- **Storage**: the default `local` driver streams bytes to `AGENT_MATRIX_ATTACH_DIR` (default: `attachments/` next to the DB), writes via temp-file + rename, and serves downloads with Range support (media scrubbing works); `AGENT_MATRIX_STORAGE` reserves an `s3` extension point (presigned direct transfer, not implemented yet)
+- **Security**: an agent can only download input files of tasks assigned to it; output uploads require a delivered assignment; the stored MIME is server-sniffed (client claims are not trusted); everything is served `attachment` by default, with inline preview only for an image/audio/video/PDF allowlist (plus a CSP sandbox); deleting a task or an agent cascades to its files
+- **Note**: attachments require agent-side runner v0.6+ — older agents upgrade by re-running `setup.sh` (see "Upgrading")
 
 ### Assignment state machine
 
@@ -116,12 +124,14 @@ sequenceDiagram
     participant S as Agent Matrix Server
     participant G as Agent (autonomous)
 
-    A->>S: POST /api/tasks (title + content + @ 1~20 agents)
+    A->>S: POST /api/tasks (title + content + attachments + @ 1~20 agents)
     loop every minute (task-runner.sh, directory lock)
         G->>S: GET /api/agent/tasks (Bearer amh_…)
-        S-->>G: its tasks (atomically marked delivered)
+        S-->>G: its tasks (atomically marked delivered) + attachment manifest
+        G->>S: GET /api/agent/attachments/{id} (download inputs to local disk)
     end
-    G->>G: run the agent's one-shot CLI (kimi -p / claude -p / …)
+    G->>G: run the agent's one-shot CLI (kimi -p / claude -p / …; prompt carries the manifest & output dir)
+    G->>S: POST /api/agent/tasks/{assignment_id}/outputs (upload output files, 0~N)
     G->>S: POST /api/agent/tasks/{assignment_id}/result (done/failed by exit code + output tail)
     A->>S: GET /api/tasks (WebUI polls status & results every 15s)
 ```
@@ -172,7 +182,7 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 ## Features
 
 - **Prompt guidance + hosted installer**: the prompt is a dozen lines of guidance; all static logic lives in the server-hosted idempotent `setup.sh` — change the logic without touching prompts, and old agents upgrade by simply re-running it
-- **Plain-text task dispatch**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot, stuck assignments can be manually requeued
+- **Task dispatch (text + attachments)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; attachments ship with the task and outputs are collected automatically; stuck assignments can be manually requeued
 - **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
 - **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
 - **Pure WebUI**: the control machine needs nothing but a browser; status dots and task progress auto-refresh every 15s
@@ -210,6 +220,8 @@ Open `http://localhost:26817` (or your domain). **The first visit forces an init
 | `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite database path |
 | `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | Public URL used in onboarding prompts. Can also be changed in WebUI Settings after deployment — **the WebUI setting takes precedence over the env var** |
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | Mark offline after this long without heartbeat |
+| `AGENT_MATRIX_STORAGE` | `local` | Attachment storage driver. `local` stores on disk; `s3` (presigned direct transfer) is a reserved extension point, not implemented yet |
+| `AGENT_MATRIX_ATTACH_DIR` | `<DB dir>/attachments` | Attachment directory (mount point) for the local driver; back it up together with the DB |
 | `AGENT_MATRIX_ADMIN_TOKEN` | empty (optional) | Emergency login token. If set, the login page can use it instead of username+password (e.g. forgotten password); without it, account login is the only path |
 
 ### Production tips
@@ -269,8 +281,10 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `GET` | `/setup.sh` | none | Download the onboarding/upgrade script (no secrets; `{{BASE_URL}}` pre-filled) |
 | `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token |
 | `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (optional `meta` JSON) |
-| `GET` | `/api/agent/tasks` | `Bearer amh_…` | Pull own pending tasks (atomically marked delivered, never twice) |
+| `GET` | `/api/agent/tasks` | `Bearer amh_…` | Pull own pending tasks (atomically marked delivered, never twice); response includes the attachment manifest |
 | `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | Write back result (`status`: done/failed + `result` ≤32KB, delivered-only, single-shot) |
+| `GET` | `/api/agent/attachments/{id}` | `Bearer amh_…` | Download an input attachment (only for tasks assigned to you) |
+| `POST` | `/api/agent/tasks/{id}/outputs` | `Bearer amh_…` | Upload an output file (multipart, one file per call, repeatable; delivered-only) |
 | `GET` | `/api/auth/status` | none | Whether setup is needed / emergency token enabled |
 | `POST` | `/api/setup` | only before setup | Create the admin account on first visit |
 | `POST` | `/api/login` | username+password / emergency token | WebUI login, sets session cookie |
@@ -278,16 +292,18 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `POST` | `/api/enrollments` | session cookie | Issue one-time token + short onboarding prompt |
 | `GET` / `POST` | `/api/settings` | session cookie | Read / update the platform base URL |
 | `DELETE` | `/api/agents/{id}` | session cookie | Delete agent (its unfinished assignments become canceled) |
-| `POST` | `/api/tasks` | session cookie | Create a task @ 1-20 agents (title ≤120 chars, content ≤16KB) |
-| `GET` | `/api/tasks`, `/api/tasks/{id}` | session cookie | Task list / detail (detail includes full results) |
+| `POST` | `/api/tasks` | session cookie | Create a task @ 1-20 agents (JSON for text-only, or multipart with ≤10 attachments of ≤100MB each, each with a caption) |
+| `GET` | `/api/tasks`, `/api/tasks/{id}` | session cookie | Task list / detail (detail includes full results and attachment lists) |
 | `POST` | `/api/tasks/{id}/cancel` | session cookie | Cancel task (unfinished assignments become canceled) |
+| `POST` | `/api/tasks/{id}/delete` | session cookie | Delete task (cascades to assignments, results and all attachment files; irreversible) |
+| `GET` | `/api/attachments/{id}` | session cookie | Preview / download an attachment (allowlisted types inline, others forced download; `?download=1` forces download) |
 | `POST` | `/api/assignments/{id}/requeue` | session cookie | Reset a suspected-stuck delivered assignment to pending |
 | `GET` | `/api/taskloop-prompt` | session cookie | Upgrade prompt for older agents (re-run setup.sh; no secrets) |
 | `GET` | `/healthz` | none | Health check |
 
 ## Scope
 
-Agent Matrix covers **registry + presence + plain-text task delivery**. The task model is deliberately simple: one dispatch, one execution, one write-back — no DAG orchestration, no automatic retries, no attachments yet (next phase). For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence, collect the result"; the orchestrator answers "multi-step pipelines".
+Agent Matrix covers **registry + presence + task delivery (text and attachments)**. The task model is deliberately simple: one dispatch, one execution, one write-back — no DAG orchestration, no automatic retries. For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence and these files, collect the result"; the orchestrator answers "multi-step pipelines".
 
 ## License
 

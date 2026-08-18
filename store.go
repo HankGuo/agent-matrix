@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS task_assignments (
     UNIQUE(task_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_assign_agent ON task_assignments(agent_id, status);
+-- 附件：输入件挂在任务上（assignment_id 为空），产出件挂在指派上。
+-- 字节不在数据库里，key 指向磁盘文件（见 blob.go）。
+CREATE TABLE IF NOT EXISTS task_attachments (
+    id            TEXT PRIMARY KEY,
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    assignment_id TEXT NOT NULL DEFAULT '',
+    agent_id      TEXT NOT NULL DEFAULT '',
+    kind          TEXT NOT NULL,
+    key           TEXT UNIQUE NOT NULL,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    size          INTEGER NOT NULL,
+    mime          TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_att_task ON task_attachments(task_id, kind);
 `
 
 // ---- 管理员账号 ----
@@ -519,4 +535,184 @@ func (s *store) cancelOpenAssignmentsForAgent(agentID string) error {
 	_, err := s.db.Exec(
 		`UPDATE task_assignments SET status = 'canceled' WHERE agent_id = ? AND status IN ('pending','delivered')`, agentID)
 	return err
+}
+
+// ---- 附件 ----
+
+// 附件方向：输入件随任务下发，产出件由 Agent 随结果上传。
+const (
+	AttIn  = "in"
+	AttOut = "out"
+)
+
+// Attachment 是一条附件元数据；字节在磁盘上，Key 是存储键。
+type Attachment struct {
+	ID           string `json:"id"`
+	TaskID       string `json:"task_id"`
+	AssignmentID string `json:"assignment_id,omitempty"`
+	AgentID      string `json:"agent_id,omitempty"`
+	Kind         string `json:"kind"`
+	Key          string `json:"-"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	Size         int64  `json:"size"`
+	Mime         string `json:"mime"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+// createAttachment 写入附件元数据。
+func (s *store) createAttachment(a *Attachment) error {
+	_, err := s.db.Exec(
+		`INSERT INTO task_attachments (id, task_id, assignment_id, agent_id, kind, key, name, description, size, mime, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.TaskID, a.AssignmentID, a.AgentID, a.Kind, a.Key, a.Name, a.Description, a.Size, a.Mime, a.CreatedAt)
+	return err
+}
+
+const attCols = `id, task_id, assignment_id, agent_id, kind, key, name, description, size, mime, created_at`
+
+func scanAtt(row interface{ Scan(...any) error }) (*Attachment, error) {
+	var a Attachment
+	err := row.Scan(&a.ID, &a.TaskID, &a.AssignmentID, &a.AgentID, &a.Kind, &a.Key,
+		&a.Name, &a.Description, &a.Size, &a.Mime, &a.CreatedAt)
+	return &a, err
+}
+
+// attachmentByID 读取单条附件元数据。
+func (s *store) attachmentByID(id string) (*Attachment, error) {
+	a, err := scanAtt(s.db.QueryRow(`SELECT `+attCols+` FROM task_attachments WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errAttNotFound
+	}
+	return a, err
+}
+
+// taskAttachments 返回一个任务的全部附件（先输入件后产出件，各自按创建顺序）。
+func (s *store) taskAttachments(taskID string) ([]Attachment, error) {
+	rows, err := s.db.Query(
+		`SELECT `+attCols+` FROM task_attachments WHERE task_id = ? ORDER BY kind, rowid`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Attachment{}
+	for rows.Next() {
+		a, err := scanAtt(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+// inputAttachmentsForTasks 批量取一组任务的输入件，供拉取接口拼装。
+func (s *store) inputAttachmentsForTasks(taskIDs []string) (map[string][]Attachment, error) {
+	out := map[string][]Attachment{}
+	for _, id := range taskIDs {
+		rows, err := s.db.Query(
+			`SELECT `+attCols+` FROM task_attachments WHERE task_id = ? AND kind = 'in' ORDER BY rowid`, id)
+		if err != nil {
+			return nil, err
+		}
+		list := []Attachment{}
+		for rows.Next() {
+			a, err := scanAtt(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			list = append(list, *a)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(list) > 0 {
+			out[id] = list
+		}
+	}
+	return out, nil
+}
+
+var errAttNotFound = errors.New("附件不存在")
+
+// agentCanReadInput 校验该输入件是否属于这个 Agent 被指派过的任务。
+func (s *store) agentCanReadInput(taskID, agentID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM task_assignments WHERE task_id = ? AND agent_id = ?`, taskID, agentID).Scan(&n)
+	return n > 0, err
+}
+
+// assignmentUploadTarget 校验产出上传：指派存在、属于该 Agent、且处于 delivered。
+// 通过则返回任务 ID。
+func (s *store) assignmentUploadTarget(assignmentID, agentID string) (string, error) {
+	var st, aid, tid string
+	err := s.db.QueryRow(
+		`SELECT status, agent_id, task_id FROM task_assignments WHERE id = ?`, assignmentID).
+		Scan(&st, &aid, &tid)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && aid != agentID) {
+		return "", errAssignNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if st != AsDelivered {
+		return "", errAssignState
+	}
+	return tid, nil
+}
+
+// deleteTask 删除任务：指派与附件记录随外键级联删除，返回待清理的存储键。
+func (s *store) deleteTask(id string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT key FROM task_attachments WHERE task_id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	keys := []string{}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	res, err := s.db.Exec(`DELETE FROM tasks WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, errTaskNotFound
+	}
+	return keys, nil
+}
+
+// deleteAgentOutputs 删除 Agent 的全部产出附件记录，返回待清理的存储键。
+func (s *store) deleteAgentOutputs(agentID string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT key FROM task_attachments WHERE agent_id = ? AND kind = 'out'`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	keys := []string{}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_, err = s.db.Exec(`DELETE FROM task_attachments WHERE agent_id = ? AND kind = 'out'`, agentID)
+	return keys, err
 }

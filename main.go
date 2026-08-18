@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.5.2"
+const version = "0.6.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -41,9 +41,15 @@ func main() {
 		log.Fatalf("初始化会话密钥失败: %v", err)
 	}
 
+	blob, err := newLocalBlob(cfg.AttachDir)
+	if err != nil {
+		log.Fatalf("初始化附件目录失败: %v", err)
+	}
+
 	s := &server{
 		cfg:        cfg,
 		store:      store,
+		blob:       blob,
 		rl:         newRateLimiter(10, time.Minute),
 		pullRl:     newRateLimiter(60, time.Minute),
 		sessionKey: sessionKey,
@@ -53,7 +59,7 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
+		ReadTimeout:       5 * time.Minute, // 放大以容纳大附件上传；慢速攻击由 ReadHeaderTimeout 兜底
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -100,11 +106,15 @@ func (s *server) routes() http.Handler {
 	// Agent 侧任务接口（Bearer amh_ 令牌）
 	mux.HandleFunc("GET /api/agent/tasks", s.handlePullTasks)
 	mux.HandleFunc("POST /api/agent/tasks/{id}/result", s.handleWriteResult)
+	mux.HandleFunc("GET /api/agent/attachments/{id}", s.handleAgentGetAttachment)
+	mux.HandleFunc("POST /api/agent/tasks/{id}/outputs", s.handleUploadOutput)
 	// 管理端任务接口
 	mux.HandleFunc("POST /api/tasks", s.requireAdmin(s.handleCreateTask))
 	mux.HandleFunc("GET /api/tasks", s.requireAdmin(s.handleListTasks))
 	mux.HandleFunc("GET /api/tasks/{id}", s.requireAdmin(s.handleTaskDetail))
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.requireAdmin(s.handleCancelTask))
+	mux.HandleFunc("POST /api/tasks/{id}/delete", s.requireAdmin(s.handleDeleteTask))
+	mux.HandleFunc("GET /api/attachments/{id}", s.requireAdmin(s.handleAdminGetAttachment))
 	mux.HandleFunc("POST /api/assignments/{id}/requeue", s.requireAdmin(s.handleRequeueAssignment))
 	mux.HandleFunc("GET /api/taskloop-prompt", s.requireAdmin(s.handleTaskLoopPrompt))
 	mux.Handle("GET /", http.FileServerFS(static))

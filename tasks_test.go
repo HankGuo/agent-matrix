@@ -20,9 +20,14 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 		t.Fatalf("打开测试库失败: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
+	blob, err := newLocalBlob(t.TempDir())
+	if err != nil {
+		t.Fatalf("初始化附件目录失败: %v", err)
+	}
 	s := &server{
 		cfg:        &config{BaseURL: "http://test.local", OnlineTimeout: 3 * time.Minute},
 		store:      st,
+		blob:       blob,
 		rl:         newRateLimiter(1000, time.Minute),
 		pullRl:     newRateLimiter(1000, time.Minute),
 		sessionKey: "test-session-key",

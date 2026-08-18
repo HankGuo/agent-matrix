@@ -203,6 +203,12 @@
   <label class="field"><span>任务内容</span>
     <textarea id="taskContent" rows="8" placeholder="写给 Agent 的完整指令。它会原样收到这段文本，执行后把结果写回。"></textarea>
   </label>
+  <div class="field"><span>附件（可选，最多 10 个，单个 ≤100MB）</span>
+    <div id="attList"></div>
+    <input type="file" id="attFile" hidden multiple>
+    <button class="btn text" id="btnAddAtt" type="button">＋ 添加附件</button>
+    <p class="hint">可为每个附件填一句说明，Agent 会按「附件1、附件2…」编号收到文件与说明。</p>
+  </div>
   <div class="field"><span>指派给（可多选，离线的上线后也会收到）</span>
     <div class="picker" id="agentPicker"></div>
   </div>
@@ -218,10 +224,16 @@
   </header>
   <p class="task-meta" id="tdMeta"><span id="tdStatus"></span><span class="muted small" id="tdTime"></span></p>
   <div class="result-block" id="tdContent"></div>
+  <div id="tdAttsWrap" hidden>
+    <div class="divider"></div>
+    <h3 class="subhead">附件</h3>
+    <div id="tdAtts"></div>
+  </div>
   <div class="divider"></div>
   <h3 class="subhead">执行情况</h3>
   <div id="tdAssigns"></div>
   <button class="btn danger full" id="btnCancelTask" hidden>取消任务</button>
+  <button class="btn danger-ghost full" id="btnDeleteTask">删除任务</button>
 </aside>
 
 <script src="/app.js"></script>

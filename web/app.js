@@ -548,10 +548,56 @@ function taskCard(t) {
 }
 
 /* 新建任务 */
+let pendingAtts = []; // [{file, descEl}]
+
+function fmtSize(n) {
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB";
+}
+
+function attRow(file) {
+  const row = document.createElement("div");
+  row.className = "att-row";
+  const nm = document.createElement("span");
+  nm.className = "att-name";
+  nm.textContent = file.name + "（" + fmtSize(file.size) + "）";
+  nm.title = file.name;
+  const desc = document.createElement("input");
+  desc.className = "att-desc";
+  desc.placeholder = "说明（可选）：这是什么、要重点关注什么";
+  desc.maxLength = 300;
+  const rm = document.createElement("button");
+  rm.className = "btn text att-rm";
+  rm.type = "button";
+  rm.textContent = "移除";
+  rm.addEventListener("click", () => {
+    pendingAtts = pendingAtts.filter((p) => p.file !== file);
+    row.remove();
+  });
+  row.append(nm, desc, rm);
+  return { row, desc };
+}
+
+$("#btnAddAtt").addEventListener("click", () => $("#attFile").click());
+$("#attFile").addEventListener("change", (e) => {
+  for (const f of e.target.files) {
+    if (pendingAtts.length >= 10) break;
+    if (f.size > 100 * 1048576) {
+      alert("「" + f.name + "」超过 100MB，已跳过");
+      continue;
+    }
+    const { row, desc } = attRow(f);
+    pendingAtts.push({ file: f, descEl: desc });
+    $("#attList").append(row);
+  }
+  e.target.value = "";
+});
+
 async function openTaskNew() {
   $("#taskTitle").value = "";
   $("#taskContent").value = "";
   $("#taskNewError").hidden = true;
+  pendingAtts = [];
+  $("#attList").replaceChildren();
   const picker = $("#agentPicker");
   picker.replaceChildren();
   let agents = [];
@@ -598,14 +644,43 @@ $("#btnCreateTask").addEventListener("click", async () => {
   const errEl = $("#taskNewError");
   errEl.hidden = true;
   const ids = [...document.querySelectorAll("#agentPicker input:checked")].map((i) => i.value);
-  const res = await api("/api/tasks", {
-    method: "POST",
-    body: JSON.stringify({
-      title: $("#taskTitle").value,
-      content: $("#taskContent").value,
-      agent_ids: ids,
-    }),
-  });
+  const btn = $("#btnCreateTask");
+  let res;
+  if (pendingAtts.length) {
+    // 有附件走 multipart：desc_i 与 file_i 按序配对
+    const fd = new FormData();
+    fd.append("title", $("#taskTitle").value);
+    fd.append("content", $("#taskContent").value);
+    fd.append("agent_ids", ids.join(","));
+    for (const p of pendingAtts) {
+      fd.append("desc", p.descEl.value);
+      fd.append("file", p.file, p.file.name);
+    }
+    btn.disabled = true;
+    btn.textContent = "上传中…";
+    try {
+      res = await fetch("/api/tasks", { method: "POST", body: fd, credentials: "same-origin" });
+    } catch {
+      res = null;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "创建任务";
+    }
+  } else {
+    res = await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: $("#taskTitle").value,
+        content: $("#taskContent").value,
+        agent_ids: ids,
+      }),
+    }).catch(() => null);
+  }
+  if (!res) {
+    errEl.textContent = "网络错误，请重试";
+    errEl.hidden = false;
+    return;
+  }
   const data = await res.json();
   if (!res.ok) {
     errEl.textContent = data.error || "创建失败";
@@ -631,6 +706,63 @@ async function openTaskDetail(id) {
   } catch { /* 网络错误时保持现状 */ }
 }
 
+/* 附件条目：白名单类型内联预览，其余给下载链接 */
+function attEl(a, idx) {
+  const wrap = document.createElement("div");
+  wrap.className = "att-item";
+  const head = document.createElement("div");
+  head.className = "att-item-head";
+  const nm = document.createElement("span");
+  nm.className = "att-name";
+  nm.textContent = (idx != null ? "[附件" + idx + "] " : "") + a.name;
+  nm.title = a.name;
+  const size = document.createElement("span");
+  size.className = "sub small";
+  size.textContent = fmtSize(a.size);
+  const link = document.createElement("a");
+  link.className = "btn text att-dl";
+  link.href = "/api/attachments/" + encodeURIComponent(a.id) + "?download=1";
+  link.textContent = "下载";
+  head.append(nm, size, link);
+  wrap.append(head);
+  if (a.description) {
+    const d = document.createElement("p");
+    d.className = "sub small att-desc-view";
+    d.textContent = a.description;
+    wrap.append(d);
+  }
+  const url = "/api/attachments/" + encodeURIComponent(a.id);
+  if (/^image\//.test(a.mime) && a.mime !== "image/svg+xml") {
+    const img = document.createElement("img");
+    img.className = "att-preview";
+    img.src = url;
+    img.alt = a.name;
+    img.loading = "lazy";
+    wrap.append(img);
+  } else if (/^audio\//.test(a.mime)) {
+    const au = document.createElement("audio");
+    au.controls = true;
+    au.src = url;
+    au.className = "att-media";
+    wrap.append(au);
+  } else if (/^video\//.test(a.mime)) {
+    const v = document.createElement("video");
+    v.controls = true;
+    v.src = url;
+    v.className = "att-media";
+    wrap.append(v);
+  } else if (a.mime === "application/pdf") {
+    const a2 = document.createElement("a");
+    a2.className = "btn text att-dl";
+    a2.href = url;
+    a2.target = "_blank";
+    a2.rel = "noopener";
+    a2.textContent = "预览 PDF";
+    wrap.append(a2);
+  }
+  return wrap;
+}
+
 function renderTaskDetail(d) {
   $("#tdTitle").textContent = d.task.title;
   const st = $("#tdStatus");
@@ -640,15 +772,22 @@ function renderTaskDetail(d) {
     (d.task.canceled_at ? " · 取消于 " + fmtTime(d.task.canceled_at) : "");
   $("#tdContent").textContent = d.task.content;
 
+  const inputs = d.inputs || [];
+  $("#tdAttsWrap").hidden = inputs.length === 0;
+  const attBox = $("#tdAtts");
+  attBox.replaceChildren();
+  inputs.forEach((a, i) => attBox.append(attEl(a, i + 1)));
+
   const box = $("#tdAssigns");
   box.replaceChildren();
+  const outputs = d.outputs || {};
   for (const a of d.assignments || []) {
-    box.append(assignBlock(a));
+    box.append(assignBlock(a, outputs[a.id] || []));
   }
   $("#btnCancelTask").hidden = ["done", "failed", "partial", "canceled"].includes(d.status);
 }
 
-function assignBlock(a) {
+function assignBlock(a, outs) {
   const div = document.createElement("div");
   div.className = "asgn";
 
@@ -694,10 +833,30 @@ function assignBlock(a) {
     pre.textContent = a.result;
     div.append(pre);
   }
+  if (outs && outs.length) {
+    const oh = document.createElement("p");
+    oh.className = "sub small att-out-head";
+    oh.textContent = "产出文件（" + outs.length + "）";
+    div.append(oh);
+    for (const o of outs) div.append(attEl(o, null));
+  }
   return div;
 }
 
 $("#btnTdClose").addEventListener("click", closePanels);
+
+$("#btnDeleteTask").addEventListener("click", async () => {
+  if (!currentTaskId) return;
+  if (!confirm("确定删除该任务？指派、结果与全部附件文件都会一并删除，不可恢复。")) return;
+  const res = await api("/api/tasks/" + encodeURIComponent(currentTaskId) + "/delete", {
+    method: "POST",
+    body: "{}",
+  });
+  if (res.ok) {
+    closePanels();
+    loadTasks();
+  }
+});
 
 $("#btnCancelTask").addEventListener("click", async () => {
   if (!currentTaskId) return;
