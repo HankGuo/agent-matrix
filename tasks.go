@@ -382,3 +382,9 @@ func (s *server) handleRequeueAssignment(w http.ResponseWriter, r *http.Request)
 func (s *server) handleTaskLoopPrompt(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"prompt": buildTaskLoopPrompt(s.baseURL())})
 }
+
+// handleDecommissionPrompt 生成给老版本 Agent 的「手动下线指令」（不含任何密钥）。
+// v0.7+ 的 Agent 不需要它：被下线后心跳收到 410 会自动自卸载。
+func (s *server) handleDecommissionPrompt(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"prompt": buildDecommissionPrompt()})
+}

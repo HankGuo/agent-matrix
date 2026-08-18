@@ -180,6 +180,14 @@
     <button class="btn primary full" id="btnCopyTaskLoop">复制指令</button>
   </div>
   <div class="divider"></div>
+  <h3 class="subhead">手动下线老 Agent</h3>
+  <p class="hint">v0.7+ 的 Agent 被「下线」后一分钟内会收到信号并自动卸载。更早版本的 Agent 收不到信号，需要把这段指令发给它手动卸载。</p>
+  <button class="btn text" id="btnDecom">生成下线指令</button>
+  <div id="decomBox" hidden>
+    <pre id="decomText"></pre>
+    <button class="btn primary full" id="btnCopyDecom">复制指令</button>
+  </div>
+  <div class="divider"></div>
   <p class="muted small" id="settingsVer"></p>
 </aside>
 

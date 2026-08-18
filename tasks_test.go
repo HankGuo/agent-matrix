@@ -364,3 +364,38 @@ func TestDeleteAgentCancelsAssignments(t *testing.T) {
 		t.Fatalf("全部指派被取消后聚合状态应为 canceled，实际 %v", detail["status"])
 	}
 }
+
+// TestDecommission 下线流程：删除后该令牌心跳收到 410（触发自卸载），未知令牌仍 401。
+func TestDecommission(t *testing.T) {
+	s, srv := newTestServer(t)
+	sess := adminSession(s)
+	a, tok := newAgent(t, s, "bye-agent")
+
+	code, _ := doJSON(t, "POST", srv.URL+"/api/heartbeat", nil, "", tok)
+	if code != http.StatusOK {
+		t.Fatalf("下线前心跳应 200，实际 %d", code)
+	}
+
+	code, _ = doJSON(t, "DELETE", srv.URL+"/api/agents/"+a.ID, nil, sess, "")
+	if code != http.StatusOK {
+		t.Fatalf("下线应 200，实际 %d", code)
+	}
+
+	code, body := doJSON(t, "POST", srv.URL+"/api/heartbeat", nil, "", tok)
+	if code != http.StatusGone {
+		t.Fatalf("下线后心跳应 410，实际 %d", code)
+	}
+	if v, _ := mustJSON(t, body)["uninstall"].(bool); !v {
+		t.Fatalf("410 响应应带 uninstall:true，实际 %s", body)
+	}
+
+	code, _ = doJSON(t, "POST", srv.URL+"/api/heartbeat", nil, "", "amh_garbagegarbagegarbage")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("未知令牌应 401，实际 %d", code)
+	}
+
+	code, _ = doJSON(t, "DELETE", srv.URL+"/api/agents/"+a.ID, nil, sess, "")
+	if code != http.StatusNotFound {
+		t.Fatalf("重复下线应 404，实际 %d", code)
+	}
+}

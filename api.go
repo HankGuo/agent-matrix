@@ -158,6 +158,11 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := s.store.agentByToken(token)
 	if err != nil {
+		// 命中下线墓碑：返回 410，Agent 端 heartbeat.sh 据此自卸载
+		if decom, derr := s.store.isDecommissioned(token); derr == nil && decom {
+			writeJSON(w, http.StatusGone, map[string]any{"uninstall": true})
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "心跳令牌无效")
 		return
 	}
@@ -400,6 +405,8 @@ func (s *server) handleListAgents(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"agents": out, "online_timeout": timeout})
 }
 
+// handleDeleteAgent 下线 Agent：取消未结束指派、清理产出附件、记录转墓碑（其
+// 下次心跳将收到 410 并自卸载），最后删除记录。列表中立即消失。
 func (s *server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !strings.HasPrefix(id, "am_") {
@@ -410,12 +417,17 @@ func (s *server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		log.Printf("取消 Agent 未结束指派失败 (%s): %v", id, err)
 	}
 	s.deleteAttachmentsOfAgent(id)
-	if err := s.store.deleteAgent(id); err != nil {
-		log.Printf("删除 Agent 失败: %v", err)
+	err := s.store.decommissionAgent(id)
+	switch {
+	case errors.Is(err, errAgentNotFound):
+		writeError(w, http.StatusNotFound, "Agent 不存在")
+		return
+	case err != nil:
+		log.Printf("下线 Agent 失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	log.Printf("Agent 已删除: %s", id)
+	log.Printf("Agent 已下线: %s（令牌已转墓碑，等待其自卸载）", id)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

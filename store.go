@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS task_attachments (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_att_task ON task_attachments(task_id, kind);
+-- 下线墓碑：Agent 删除后其心跳令牌哈希在此保留一段时间，
+-- 心跳命中墓碑返回 410，Agent 端据此自卸载；定期惰性清理。
+CREATE TABLE IF NOT EXISTS decommissioned_tokens (
+    token_hash TEXT PRIMARY KEY,
+    deleted_at INTEGER NOT NULL
+);
 `
 
 // ---- 管理员账号 ----
@@ -260,10 +266,46 @@ func (s *store) listAgents() ([]Agent, error) {
 	return out, rows.Err()
 }
 
-func (s *store) deleteAgent(id string) error {
-	_, err := s.db.Exec(`DELETE FROM agents WHERE id = ?`, id)
-	return err
+// decommissionAgent 下线 Agent：令牌哈希转入墓碑表（心跳将收到 410 触发自卸载），
+// 再删除 Agent 记录；同时惰性清理 30 天前的墓碑。
+func (s *store) decommissionAgent(id string) error {
+	now := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var tokenHash string
+	err = tx.QueryRow(`SELECT token_hash FROM agents WHERE id = ?`, id).Scan(&tokenHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errAgentNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO decommissioned_tokens (token_hash, deleted_at) VALUES (?,?)`,
+		tokenHash, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM decommissioned_tokens WHERE deleted_at < ?`, now-30*86400); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM agents WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
+
+// isDecommissioned 报告该心跳令牌是否属于已下线的 Agent。
+func (s *store) isDecommissioned(token string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM decommissioned_tokens WHERE token_hash = ?`, hashToken(token)).Scan(&n)
+	return n > 0, err
+}
+
+var errAgentNotFound = errors.New("Agent 不存在")
 
 // validMeta 要求 meta 为空或合法 JSON 对象文本。
 func validMeta(s string) bool {

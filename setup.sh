@@ -62,10 +62,34 @@ say "== 执行器: $RUN_TASK"
 # ---- 3) 心跳脚本 ----
 # 临时文件 + mv 原子替换：本脚本可能被「自升级任务」触发，此时 heartbeat.sh / task-runner.sh
 # 可能正在运行；直接 cat > 截断改写会让运行中的 sh 实例读到错乱内容，mv 换 inode 则安全。
+# 心跳收到 410（已下线）时自卸载：runner 忙则本轮推迟；卸定时任务、删整个 ~/.agent-matrix。
 cat > "$DIR/.heartbeat.sh.tmp" <<'EOF'
 #!/bin/sh
 . "$HOME/.agent-matrix/config"
-curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" >/dev/null 2>&1 || true
+code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$AM_URL/api/heartbeat" \
+  -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
+[ "$code" = "410" ] || exit 0
+
+# 已被平台下线：runner 正在执行任务则本轮跳过，下一分钟心跳仍会 410，届时再卸
+mkdir "$HOME/.agent-matrix/runner.lock" 2>/dev/null || exit 0
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  for unit in heartbeat task-runner; do
+    plist="$HOME/Library/LaunchAgents/com.agent-matrix.$unit.plist"
+    launchctl unload "$plist" 2>/dev/null
+    rm -f "$plist"
+  done
+elif command -v crontab >/dev/null 2>&1; then
+  crontab -l 2>/dev/null | grep -v 'agent-matrix/' | crontab - 2>/dev/null
+elif command -v systemctl >/dev/null 2>&1; then
+  for unit in heartbeat task-runner; do
+    systemctl --user disable --now "agent-matrix-$unit.timer" 2>/dev/null
+    rm -f "$HOME/.config/systemd/user/agent-matrix-$unit.service" \
+          "$HOME/.config/systemd/user/agent-matrix-$unit.timer"
+  done
+  systemctl --user daemon-reload 2>/dev/null
+fi
+cd / && rm -rf "$HOME/.agent-matrix"
 EOF
 mv -f "$DIR/.heartbeat.sh.tmp" "$DIR/heartbeat.sh"
 

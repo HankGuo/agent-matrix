@@ -185,6 +185,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 - **任务派发（文本 + 附件）**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；附件随任务下发、产出自动回收；卡住的指派可手动重新投递
 - **首次访问强制初始化**：无任何账号时 WebUI 只开放初始化页，密码 PBKDF2-SHA256 加盐存储
 - **一次性注册令牌**：24 小时有效、只用一次；注册后换发独立心跳令牌，数据库只存哈希
+- **一键下线**：点「下线」后 Agent 立即从列表消失；其令牌转入墓碑表（保留 30 天），下次心跳收到 410 即触发自卸载（卸定时任务、删 `~/.agent-matrix`，runner 忙则自动推迟；机器关机的，开机后第一次心跳照样清理）。v0.7 之前接入的老 Agent 在「设置」里生成手动下线指令发给它即可
 - **纯 WebUI**：管理端只需要浏览器；15 秒自动刷新状态灯与任务进度
 - **跨平台心跳**：安装脚本自动识别 Linux（cron / systemd user timer）、macOS（launchd），其余平台打印手动说明
 - **可靠部署**：一个静态二进制 + 一个 SQLite 文件，systemd 拉起即可；内建优雅退出、限流、安全响应头
@@ -291,7 +292,7 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `GET` | `/api/agents` | 会话 Cookie | Agent 列表（含在线状态） |
 | `POST` | `/api/enrollments` | 会话 Cookie | 生成一次性令牌 + 精简接入指令 |
 | `GET` / `POST` | `/api/settings` | 会话 Cookie | 读取 / 修改平台地址 |
-| `DELETE` | `/api/agents/{id}` | 会话 Cookie | 删除 Agent（其未结束指派自动置 canceled） |
+| `DELETE` | `/api/agents/{id}` | 会话 Cookie | 下线 Agent（令牌转墓碑；其下次心跳收到 410 并自卸载，未结束指派自动置 canceled） |
 | `POST` | `/api/tasks` | 会话 Cookie | 创建任务并 @ 1-20 个 Agent（JSON 纯文本，或 multipart 带 ≤10 个附件，每个 ≤100MB、可带说明） |
 | `GET` | `/api/tasks`、`/api/tasks/{id}` | 会话 Cookie | 任务列表 / 详情（详情含各指派结果全文与附件清单） |
 | `POST` | `/api/tasks/{id}/cancel` | 会话 Cookie | 取消任务（未结束指派全部置 canceled） |
@@ -299,6 +300,7 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `GET` | `/api/attachments/{id}` | 会话 Cookie | 预览 / 下载附件（白名单类型 inline，其余强制下载；`?download=1` 强制下载） |
 | `POST` | `/api/assignments/{id}/requeue` | 会话 Cookie | 把疑似卡住的 delivered 指派重置回 pending |
 | `GET` | `/api/taskloop-prompt` | 会话 Cookie | 生成老 Agent 的升级指令（引导重跑 setup.sh，不含密钥） |
+| `GET` | `/api/decommission-prompt` | 会话 Cookie | 生成老 Agent（v0.7 之前）的手动下线指令（不含密钥） |
 | `GET` | `/healthz` | 无 | 健康检查 |
 
 ## 定位与边界

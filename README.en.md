@@ -185,6 +185,7 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 - **Task dispatch (text + attachments)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; attachments ship with the task and outputs are collected automatically; stuck assignments can be manually requeued
 - **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
 - **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
+- **One-click decommission**: the agent vanishes from the list immediately; its token hash moves to a tombstone table (kept 30 days), and its next heartbeat gets a 410 that triggers self-uninstall (scheduler removed, `~/.agent-matrix` deleted; deferred while the runner is busy; a powered-off machine still cleans up on its first heartbeat after boot). For agents enrolled before v0.7, generate a manual decommission prompt under Settings
 - **Pure WebUI**: the control machine needs nothing but a browser; status dots and task progress auto-refresh every 15s
 - **Cross-platform heartbeat**: the installer auto-detects Linux (cron / systemd user timer) and macOS (launchd), and prints manual instructions elsewhere
 - **Reliable deployment**: one static binary + one SQLite file under systemd; graceful shutdown, rate limiting, and security headers built in
@@ -291,7 +292,7 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `GET` | `/api/agents` | session cookie | Agent list with online status |
 | `POST` | `/api/enrollments` | session cookie | Issue one-time token + short onboarding prompt |
 | `GET` / `POST` | `/api/settings` | session cookie | Read / update the platform base URL |
-| `DELETE` | `/api/agents/{id}` | session cookie | Delete agent (its unfinished assignments become canceled) |
+| `DELETE` | `/api/agents/{id}` | session cookie | Decommission agent (token tombstoned; its next heartbeat gets 410 → self-uninstall; unfinished assignments become canceled) |
 | `POST` | `/api/tasks` | session cookie | Create a task @ 1-20 agents (JSON for text-only, or multipart with ≤10 attachments of ≤100MB each, each with a caption) |
 | `GET` | `/api/tasks`, `/api/tasks/{id}` | session cookie | Task list / detail (detail includes full results and attachment lists) |
 | `POST` | `/api/tasks/{id}/cancel` | session cookie | Cancel task (unfinished assignments become canceled) |
@@ -299,6 +300,7 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `GET` | `/api/attachments/{id}` | session cookie | Preview / download an attachment (allowlisted types inline, others forced download; `?download=1` forces download) |
 | `POST` | `/api/assignments/{id}/requeue` | session cookie | Reset a suspected-stuck delivered assignment to pending |
 | `GET` | `/api/taskloop-prompt` | session cookie | Upgrade prompt for older agents (re-run setup.sh; no secrets) |
+| `GET` | `/api/decommission-prompt` | session cookie | Manual decommission prompt for pre-v0.7 agents (no secrets) |
 | `GET` | `/healthz` | none | Health check |
 
 ## Scope

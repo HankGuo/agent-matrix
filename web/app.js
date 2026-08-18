@@ -255,7 +255,7 @@ function agentCard(a) {
   foot.className = "acard-foot";
   const del = document.createElement("button");
   del.className = "btn text acard-del";
-  del.textContent = "删除";
+  del.textContent = "下线";
   del.addEventListener("click", () => removeAgent(a));
   foot.append(del);
 
@@ -270,7 +270,7 @@ function td(text) {
 }
 
 async function removeAgent(a) {
-  if (!confirm(`确定删除 Agent「${a.name}」(${a.id})？删除后它将无法继续上报心跳。`)) return;
+  if (!confirm(`确定下线 Agent「${a.name}」(${a.id})？\n\n它会立即从列表消失。v0.7+ 的 Agent 一分钟左右收到信号并自动卸载本机配置；更早版本请到「设置 → 手动下线老 Agent」生成指令发给它。`)) return;
   const res = await api("/api/agents/" + encodeURIComponent(a.id), { method: "DELETE" });
   if (res.ok) loadAgents();
 }
@@ -843,6 +843,32 @@ $("#btnCopyTaskLoop").addEventListener("click", async () => {
   } catch {
     const range = document.createRange();
     range.selectNodeContents($("#taskLoopText"));
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    btn.textContent = "已选中，请按 ⌘C";
+  }
+  setTimeout(() => (btn.textContent = "复制指令"), 2000);
+});
+
+/* 老 Agent 手动下线指令 */
+$("#btnDecom").addEventListener("click", async () => {
+  const res = await api("/api/decommission-prompt");
+  if (!res.ok) return;
+  const data = await res.json();
+  $("#decomText").textContent = data.prompt;
+  $("#decomBox").hidden = false;
+  $("#btnDecom").hidden = true;
+});
+
+$("#btnCopyDecom").addEventListener("click", async () => {
+  const btn = $("#btnCopyDecom");
+  try {
+    await navigator.clipboard.writeText($("#decomText").textContent);
+    btn.textContent = "已复制 ✓";
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents($("#decomText"));
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);

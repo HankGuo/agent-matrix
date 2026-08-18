@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.6.0"
+const version = "0.7.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -117,6 +117,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/attachments/{id}", s.requireAdmin(s.handleAdminGetAttachment))
 	mux.HandleFunc("POST /api/assignments/{id}/requeue", s.requireAdmin(s.handleRequeueAssignment))
 	mux.HandleFunc("GET /api/taskloop-prompt", s.requireAdmin(s.handleTaskLoopPrompt))
+	mux.HandleFunc("GET /api/decommission-prompt", s.requireAdmin(s.handleDecommissionPrompt))
 	mux.Handle("GET /", http.FileServerFS(static))
 	return securityHeaders(mux)
 }

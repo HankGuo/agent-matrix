@@ -56,3 +56,20 @@ const taskLoopTemplate = `你已接入 Agent Matrix 监控中心（凭证在本�
 3. 旧机制清理：脚本已自动覆盖 heartbeat.sh 并删除 inbox.jsonl（v0.4 残留），你只需确认没有别处引用它。
 4. 把脚本末尾的自检输出原样汇报给我。
 `
+
+// buildDecommissionPrompt 生成给老版本 Agent 的「手动下线指令」。
+// 新版 Agent（v0.7+）不需要它：被下线后心跳会收到 410，heartbeat.sh 自动自卸载。
+// 不含任何密钥。
+func buildDecommissionPrompt() string { return decommissionTemplate }
+
+const decommissionTemplate = `你已从 Agent Matrix 监控中心下线。请完成自我卸载，全部幂等：
+
+1. 卸载定时任务（按你的系统选一种）：
+   - macOS: launchctl unload ~/Library/LaunchAgents/com.agent-matrix.heartbeat.plist ~/Library/LaunchAgents/com.agent-matrix.task-runner.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/com.agent-matrix.*.plist
+   - Linux cron: crontab -l | grep -v 'agent-matrix/' | crontab -
+   - Linux systemd: systemctl --user disable --now agent-matrix-heartbeat.timer agent-matrix-task-runner.timer; rm -f ~/.config/systemd/user/agent-matrix-*; systemctl --user daemon-reload
+2. 如果 ~/.agent-matrix/runner.lock 存在，说明任务正在执行，等一分钟后重试第 1 步再往下走。
+3. 删除配置与脚本目录：rm -rf ~/.agent-matrix
+4. 验证：crontab -l / launchctl list / systemctl --user list-timers 中不再有任何 agent-matrix 条目，且 ~/.agent-matrix 已不存在。
+5. 向我汇报卸载结果；任何一步失败带原始报错汇报，不要静默跳过。
+`
