@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给任意具备 shell 执行能力的 Agent（Claude Code / Kimi CLI / Codex / OpenClaw / Hermes……），Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（OpenClaw / Hermes / 本地工具皆可），再把结果与产出文件写回。
+轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给目标机器上具备 shell 执行能力的 Agent，Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（官方支持 OpenClaw 常驻 Gateway 与 Hermes Agent 一次性模式），再把结果与产出文件写回。
 
 单二进制 + 嵌入式 SQLite + 内嵌 WebUI，**零外部运行时依赖**。
 
@@ -79,7 +79,7 @@ sequenceDiagram
 
 ## 任务派发（文本 + 附件）
 
-管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent，可携带最多 10 个附件（单个 ≤100MB，每个附件可单独填一句说明）。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 kimi → claude → openclaw → hermes 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
+管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent，可携带最多 10 个附件（单个 ≤100MB，每个附件可单独填一句说明）。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 openclaw → hermes 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
 
 执行器脚本的可靠性设计：目录锁防重入（任务串行执行，一个没跑完后续轮次自动跳过）、显式补全窄调度环境的 PATH、结果截取尾部 30KB 写回。
 
@@ -129,7 +129,7 @@ sequenceDiagram
         S-->>G: 属于它的任务（原子置 delivered）+ 附件清单
         G->>S: GET /api/agent/attachments/{id}（下载输入件到本机）
     end
-    G->>G: 调 Agent 的一次性 CLI 命令执行（kimi -p / claude -p / …，提示词内含附件清单与产出目录）
+    G->>G: 调 Agent 的一次性 CLI 命令执行（openclaw agent / hermes chat -q，提示词内含附件清单与产出目录）
     G->>S: POST /api/agent/tasks/{assignment_id}/outputs（上传产出文件，0~N 个）
     G->>S: POST /api/agent/tasks/{assignment_id}/result（按退出码 done/failed + 输出尾部）
     A->>S: GET /api/tasks（WebUI 每 15s 轮询状态与结果）
@@ -161,7 +161,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、各项自检是否 ok。
 
 ## 备注
-- 任务执行器命令默认按 kimi → claude → openclaw → hermes 顺序自动探测；要指定就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
+- 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
 - 调度环境未被自动识别时（如 Windows），脚本会打印手动安装说明，照做即可。
 ```
 
@@ -171,7 +171,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 
 - **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有 `~/.agent-matrix/config` 则整步跳过，天然幂等，重复执行等于升级）
 - **落盘**：`~/.agent-matrix/config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
-- **执行器自动探测**：按 kimi → claude → openclaw → hermes 顺序找可用的 CLI；也可用 `AM_RUN_TASK='…'` 环境变量显式指定（`$1`=任务内容、`$2`=任务ID tsk_…，OpenClaw 常驻 Gateway 时用 `--session-key "matrix-$2"` 实现每任务一会话）
+- **执行器自动探测**：官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序找可用的 CLI；也可用 `AM_RUN_TASK='…'` 环境变量显式指定（`$1`=任务内容、`$2`=任务ID tsk_…，OpenClaw 常驻 Gateway 时用 `--session-key "matrix-$2"` 实现每任务一会话）
 - **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）
 - **安装每分钟定时**：macOS → launchd 两个 plist（unload + load 幂等）；Linux → cron 合并两行或 systemd --user 两对 service+timer；都不识别则打印手动安装说明（Windows 场景）
 - **自检**：真实跑一次心跳、一次任务拉取，并用 `env -i` 窄环境模拟调度器跑 runner，最后输出 `AM_SETUP_DONE name=… sched=…`

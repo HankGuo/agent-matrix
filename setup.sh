@@ -4,13 +4,13 @@
 # 用法：
 #   新接入：AM_URL="https://matrix.example.com" AM_TOKEN="ame_…" AM_NAME="my-agent" sh setup.sh
 #   升级/换装：sh setup.sh            （已有 ~/.agent-matrix/config 时跳过注册，直接更新脚本与定时任务）
-#   指定执行器：AM_RUN_TASK='kimi -p "$1"' sh setup.sh
+#   指定执行器：AM_RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1"' sh setup.sh
 #
 # 自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 →
 #           安装每分钟定时任务（cron / launchd / systemd user timer）→ 自检。
 set -u
 
-PATH="$HOME/.kimi-code/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
+PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 export PATH
 
 AM_URL="${AM_URL:-{{BASE_URL}}}"
@@ -44,13 +44,14 @@ else
 fi
 
 # ---- 2) 选定任务执行命令（写入 config，之后改命令只需编辑 config） ----
+# 官方支持 OpenClaw 与 Hermes Agent 两家执行器，按顺序探测：
+#   openclaw: 走常驻 Gateway 的一个 agent turn，--session-key 按任务 ID 分会话
+#   hermes:   chat -q 一次性非交互模式，--quiet 抑制装饰输出，--source 打标便于过滤
 RUN_TASK="${AM_RUN_TASK:-}"
 if [ -z "$RUN_TASK" ]; then
-  if   command -v kimi     >/dev/null 2>&1; then RUN_TASK='kimi -p "$1"'
-  elif command -v claude   >/dev/null 2>&1; then RUN_TASK='claude -p "$1"'
-  elif command -v openclaw >/dev/null 2>&1; then RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1" --timeout 1800'
-  elif command -v hermes   >/dev/null 2>&1; then RUN_TASK='hermes chat -q "$1" --quiet'
-  else RUN_TASK='echo "config 里的 AM_RUN_TASK 是占位值，请填入你的一次性非交互执行命令（$1=任务内容 $2=任务ID）" >&2; exit 99'
+  if   command -v openclaw >/dev/null 2>&1; then RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1" --timeout 1800'
+  elif command -v hermes   >/dev/null 2>&1; then RUN_TASK='hermes chat -q "$1" --quiet --source matrix'
+  else RUN_TASK='echo "未探测到 openclaw / hermes CLI：请先安装其一，或编辑 config 把 AM_RUN_TASK 改成你的一次性非交互执行命令（$1=任务内容 $2=任务ID）" >&2; exit 99'
   fi
 fi
 case "$RUN_TASK" in *"'"*) die "AM_RUN_TASK 不能包含单引号";; esac
@@ -103,7 +104,7 @@ mkdir "$lockdir" 2>/dev/null || exit 0   # 一个任务没跑完，后续轮次�
 trap 'rmdir "$lockdir"' EXIT
 
 # 调度环境（cron/launchd/systemd）的 PATH 极窄，显式补全 CLI 常见目录
-PATH="$HOME/.kimi-code/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
+PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 export PATH
 
 . "$HOME/.agent-matrix/config"

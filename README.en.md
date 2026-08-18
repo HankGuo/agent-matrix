@@ -2,7 +2,7 @@
 
 [中文文档](README.md)
 
-A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to any agent with shell access (Claude Code, Kimi CLI, Codex, OpenClaw, Hermes…). Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in whatever channel it has (OpenClaw / Hermes / local tools), and writes the result — plus any output files — back.
+A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access on the target machine. Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in its own channel (officially supporting OpenClaw's long-running Gateway and Hermes Agent's one-shot mode), and writes the result — plus any output files — back.
 
 Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
 
@@ -79,7 +79,7 @@ sequenceDiagram
 
 ## Task dispatch (text + attachments)
 
-The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents, optionally with up to 10 attachments (≤100MB each, each with its own caption). On each agent machine, `task-runner.sh` pulls tasks every minute, **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order kimi → claude → openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
+The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents, optionally with up to 10 attachments (≤100MB each, each with its own caption). On each agent machine, `task-runner.sh` pulls tasks every minute, **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
 
 Runner reliability: a directory lock prevents re-entry (tasks run serially; later ticks skip while one is running), the narrow scheduler PATH is augmented explicitly, and the result written back is the last 30KB of output.
 
@@ -129,7 +129,7 @@ sequenceDiagram
         S-->>G: its tasks (atomically marked delivered) + attachment manifest
         G->>S: GET /api/agent/attachments/{id} (download inputs to local disk)
     end
-    G->>G: run the agent's one-shot CLI (kimi -p / claude -p / …; prompt carries the manifest & output dir)
+    G->>G: run the agent's one-shot CLI (openclaw agent / hermes chat -q; prompt carries the manifest & output dir)
     G->>S: POST /api/agent/tasks/{assignment_id}/outputs (upload output files, 0~N)
     G->>S: POST /api/agent/tasks/{assignment_id}/result (done/failed by exit code + output tail)
     A->>S: GET /api/tasks (WebUI polls status & results every 15s)
@@ -161,7 +161,7 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、各项自检是否 ok。
 
 ## 备注
-- 任务执行器命令默认按 kimi → claude → openclaw → hermes 顺序自动探测；要指定就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
+- 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
 - 调度环境未被自动识别时（如 Windows），脚本会打印手动安装说明，照做即可。
 ```
 
@@ -171,7 +171,7 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 
 - **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when `~/.agent-matrix/config` already exists — naturally idempotent, re-running means upgrading)
 - **Persist**: `~/.agent-matrix/config` (mode 600) with `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
-- **Detect the executor**: first available CLI in the order kimi → claude → openclaw → hermes; or set `AM_RUN_TASK='…'` explicitly (`$1`=task content, `$2`=task ID tsk_…; with OpenClaw's long-running Gateway, `--session-key "matrix-$2"` gives one session per task)
+- **Detect the executor**: OpenClaw and Hermes Agent are the officially supported executors, probed in the order openclaw → hermes; or set `AM_RUN_TASK='…'` explicitly (`$1`=task content, `$2`=task ID tsk_…; with OpenClaw's long-running Gateway, `--session-key "matrix-$2"` gives one session per task)
 - **Write two scripts**: `heartbeat.sh` and `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail)
 - **Install the per-minute scheduler**: macOS → two launchd plists (unload + load, idempotent); Linux → two merged cron lines or two systemd --user service+timer pairs; otherwise prints manual instructions (e.g. Windows)
 - **Self-check**: runs a real heartbeat, a real task pull, and the runner under an `env -i` narrow environment, then prints `AM_SETUP_DONE name=… sched=…`
