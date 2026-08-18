@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给目标机器上具备 shell 执行能力的 Agent，Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（官方支持 OpenClaw 常驻 Gateway 与 Hermes Agent 一次性模式），再把结果与产出文件写回。
+轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给目标机器上具备 shell 执行能力的 Agent，Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（官方支持 OpenClaw 常驻 Gateway 与 Hermes Agent），再把结果与产出文件写回。任务不是一次性的：详情页里可以随时「继续任务」追加新一轮指令，**任务 ID 就是 Agent 侧的会话标识**，同一任务的所有轮次在同一个会话里演进，上下文连贯。
 
 单二进制 + 嵌入式 SQLite + 内嵌 WebUI，**零外部运行时依赖**。
 
@@ -90,6 +90,17 @@ sequenceDiagram
 - **存储**：默认 `local` 驱动，字节落在 `AGENT_MATRIX_ATTACH_DIR`（默认与数据库同级的 `attachments/`），流式读写、先写临时文件再 rename、下载支持 Range（音视频可拖进度条）；`AGENT_MATRIX_STORAGE` 预留 `s3` 扩展点（预签名直传，尚未实现）
 - **安全**：Agent 只能下载自己被指派任务的输入件；产出上传仅限 delivered 状态的指派；MIME 以服务端嗅探为准（客户端声明不可信）；默认强制下载，仅图片/音频/视频/PDF 白名单允许 inline 预览（且加 CSP sandbox）；删除任务/Agent 时级联清理文件
 
+### 继续任务：多轮与会话绑定
+
+任务创建后可在详情页底部随时追加新一轮指令（「继续任务」）：每一轮为每个目标 Agent 生成一条新指派（`seq` 递增、各自快照本轮指令、独立回写），历史轮次完整保留为对话线程。追加时默认沿用任务现有 Agent，也可以勾选拉新的 Agent 进场。
+
+**任务 ID 即会话 ID**，两台官方执行器的绑定方式：
+
+- **OpenClaw**：常驻 Gateway 原生支持会话键，每轮执行 `openclaw agent --session-key "matrix-<任务ID>" --message …`，同任务自动续上同一会话
+- **Hermes Agent**：由 setup.sh 生成的 `hermes-round.sh` 包装——首轮 `hermes -z` 新建会话并从 usage 报告取精确 session_id 存档（`~/.agent-matrix/sessions/<任务ID>`，同时 rename 为 `matrix-<任务ID>` 便于在 `hermes sessions` 里辨认），后续轮 `hermes chat -q --resume <sid>` 续上；取不到 session_id 的老版本退化为每轮新会话，不影响执行本身
+
+产出文件回收后移入 `out/sent/` 子目录归档，后续轮次不会重复上传，文件仍可被会话读取引用。
+
 ### 指派状态机
 
 ```mermaid
@@ -171,7 +182,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 
 - **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有 `~/.agent-matrix/config` 则整步跳过，天然幂等，重复执行等于升级）
 - **落盘**：`~/.agent-matrix/config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
-- **执行器自动探测**：官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序找可用的 CLI；也可用 `AM_RUN_TASK='…'` 环境变量显式指定（`$1`=任务内容、`$2`=任务ID tsk_…，OpenClaw 常驻 Gateway 时用 `--session-key "matrix-$2"` 实现每任务一会话）
+- **执行器自动探测**：官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序找可用的 CLI；OpenClaw 用 `--session-key "matrix-$2"` 实现每任务一会话，Hermes 走生成的 `hermes-round.sh` 包装（首轮建会话存档 session_id，后续轮 `--resume` 续上）；也可用 `AM_RUN_TASK='…'` 环境变量显式指定（`$1`=任务内容、`$2`=任务ID tsk_…）
 - **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）
 - **安装每分钟定时**：macOS → launchd 两个 plist（unload + load 幂等）；Linux → cron 合并两行或 systemd --user 两对 service+timer；都不识别则打印手动安装说明（Windows 场景）
 - **自检**：真实跑一次心跳、一次任务拉取，并用 `env -i` 窄环境模拟调度器跑 runner，最后输出 `AM_SETUP_DONE name=… sched=…`
@@ -179,11 +190,11 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 ## 特性
 
 - **提示词引导 + 托管安装脚本**：提示词只有十几行引导；静态逻辑收敛到服务器托管的幂等 `setup.sh`，改逻辑不用改提示词，重跑一遍即升级到最新执行器
-- **任务派发（文本 + 附件）**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；附件随任务下发、产出自动回收；卡住的指派可手动重新投递
+- **任务派发（文本 + 附件 + 多轮）**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；详情页可「继续任务」追加轮次，任务 ID 绑定 Agent 会话、上下文连贯；附件随任务下发、产出自动回收归档；卡住的指派可手动重新投递
 - **首次访问强制初始化**：无任何账号时 WebUI 只开放初始化页，密码 PBKDF2-SHA256 加盐存储
 - **一次性注册令牌**：24 小时有效、只用一次；注册后换发独立心跳令牌，数据库只存哈希
 - **一键下线**：点「下线」后 Agent 立即从列表消失；其令牌转入墓碑表（保留 30 天），下次心跳收到 410 即触发自卸载（卸定时任务、删 `~/.agent-matrix`，runner 忙则自动推迟；机器关机的，开机后第一次心跳照样清理）
-- **纯 WebUI**：管理端只需要浏览器；15 秒自动刷新状态灯与任务进度
+- **纯 WebUI**：管理端只需要浏览器；任务看板（进行中 / 已完成 / 失败·取消 三列，移动端分段单列）+ 按轮次的对话线程详情，15 秒自动刷新状态灯与任务进度
 - **跨平台心跳**：安装脚本自动识别 Linux（cron / systemd user timer）、macOS（launchd），其余平台打印手动说明
 - **可靠部署**：一个静态二进制 + 一个 SQLite 文件，systemd 拉起即可；内建优雅退出、限流、安全响应头
 
@@ -252,7 +263,8 @@ WantedBy=multi-user.target
 3. Agent 执行完会汇报「是否注册成功、执行器命令、定时任务类型、自检结果」
 4. 回到 WebUI，状态灯变绿即接入完成
 5. 切到「任务」页 → 新建任务 → 写标题和内容、勾选一个或多个 Agent → 创建
-6. Agent 一分钟内自行拉到任务并自治执行，结果写回；点「详情」可看每个 Agent 的状态与结果全文
+6. Agent 一分钟内自行拉到任务并自治执行，结果写回；点任务卡进入详情，按轮次看每个 Agent 的状态与结果全文
+7. 需要接着深挖时，在详情页底部「继续任务」输入新一轮指令发送：同一任务同一 Agent 会话，上下文连贯；也可以勾选拉新的 Agent 进场
 
 > 注意：目标 Agent 必须具备**执行 shell 命令和创建定时任务**的能力。只能对话、无法执行命令的 Agent（例如某些厂商托管的 IM 机器人）无法自行接入——这是机制决定的，不是配置问题。
 
@@ -290,6 +302,7 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `GET` / `POST` | `/api/settings` | 会话 Cookie | 读取 / 修改平台地址 |
 | `DELETE` | `/api/agents/{id}` | 会话 Cookie | 下线 Agent（令牌转墓碑；其下次心跳收到 410 并自卸载，未结束指派自动置 canceled） |
 | `POST` | `/api/tasks` | 会话 Cookie | 创建任务并 @ 1-20 个 Agent（JSON 纯文本，或 multipart 带 ≤10 个附件，每个 ≤100MB、可带说明） |
+| `POST` | `/api/tasks/{id}/followup` | 会话 Cookie | 继续任务：追加一轮指令（`content` 必填，`agent_ids` 缺省沿用任务现有 Agent），生成 seq+1 的新指派 |
 | `GET` | `/api/tasks`、`/api/tasks/{id}` | 会话 Cookie | 任务列表 / 详情（详情含各指派结果全文与附件清单） |
 | `POST` | `/api/tasks/{id}/cancel` | 会话 Cookie | 取消任务（未结束指派全部置 canceled） |
 | `POST` | `/api/tasks/{id}/delete` | 会话 Cookie | 删除任务（级联删除指派、结果与全部附件文件，不可恢复） |
@@ -299,7 +312,7 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 
 ## 定位与边界
 
-Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**。任务模型刻意简单：一次派发、一次执行、一次回写——没有 DAG 编排、没有自动重试。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话和这些文件送到、把结果收回来」，编排平台负责「多步流程」。
+Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**。任务模型刻意简单：一轮派发、一次执行、一次回写，需要接着做就追加一轮（同任务同会话）——没有 DAG 编排、没有自动重试。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话和这些文件送到、把结果收回来」，编排平台负责「多步流程」。
 
 ## License
 

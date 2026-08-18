@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// 任务内容边界：纯文本，附件留待下一阶段。
+// 任务内容边界：纯文本指令（可追加轮次），附件经独立管道随任务下发。
 const (
 	titleMax      = 120
 	contentMax    = 16 << 10
@@ -374,6 +374,71 @@ func (s *server) handleRequeueAssignment(w http.ResponseWriter, r *http.Request)
 	case errors.Is(err, errAssignState):
 		writeError(w, http.StatusConflict, "仅「执行中」的指派可以重新投递")
 	default:
+		writeError(w, http.StatusInternalServerError, "内部错误")
+	}
+}
+
+// handleCreateFollowup 给已有任务追加一轮指令（继续任务）。
+// 请求体：{"content": "...", "agent_ids": [...]}；agent_ids 省略时沿用任务当前仍存在的全部 Agent。
+// 同一任务 ID 在 Agent 侧绑定同一会话（OpenClaw --session-key / Hermes --resume），追加轮自动带上上文。
+func (s *server) handleCreateFollowup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !strings.HasPrefix(id, "tsk_") {
+		writeError(w, http.StatusBadRequest, "无效的任务 ID")
+		return
+	}
+	var req struct {
+		Content  string   `json:"content"`
+		AgentIDs []string `json:"agent_ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		writeError(w, http.StatusBadRequest, "内容不能为空")
+		return
+	}
+	if len(content) > contentMax {
+		writeError(w, http.StatusBadRequest, "内容不能超过 16KB")
+		return
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(req.AgentIDs))
+	for _, one := range req.AgentIDs {
+		if one = strings.TrimSpace(one); !seen[one] && strings.HasPrefix(one, "am_") {
+			seen[one] = true
+			ids = append(ids, one)
+		}
+	}
+	if len(ids) > maxAssignees {
+		writeError(w, http.StatusBadRequest, "一次最多追加给 20 个 Agent")
+		return
+	}
+	if len(ids) > 0 {
+		ok, err := s.store.agentsExist(ids)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "内部错误")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusBadRequest, "包含不存在的 Agent")
+			return
+		}
+	}
+	seq, err := s.store.createFollowup(id, content, ids)
+	switch {
+	case err == nil:
+		log.Printf("任务 %s 追加第 %d 轮，指派给 %d 个 Agent", id, seq, len(ids))
+		writeJSON(w, http.StatusCreated, map[string]any{"seq": seq})
+	case errors.Is(err, errTaskNotFound):
+		writeError(w, http.StatusNotFound, "任务不存在")
+	case errors.Is(err, errTaskCanceled):
+		writeError(w, http.StatusConflict, errTaskCanceled.Error())
+	case errors.Is(err, errAgentNotFound):
+		writeError(w, http.StatusConflict, "该任务的 Agent 都已删除，无可追加对象")
+	default:
+		log.Printf("追加任务轮次失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 	}
 }

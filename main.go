@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.8.1"
+const version = "0.9.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -113,6 +113,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks", s.requireAdmin(s.handleListTasks))
 	mux.HandleFunc("GET /api/tasks/{id}", s.requireAdmin(s.handleTaskDetail))
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.requireAdmin(s.handleCancelTask))
+	mux.HandleFunc("POST /api/tasks/{id}/followup", s.requireAdmin(s.handleCreateFollowup))
 	mux.HandleFunc("POST /api/tasks/{id}/delete", s.requireAdmin(s.handleDeleteTask))
 	mux.HandleFunc("GET /api/attachments/{id}", s.requireAdmin(s.handleAdminGetAttachment))
 	mux.HandleFunc("POST /api/assignments/{id}/requeue", s.requireAdmin(s.handleRequeueAssignment))

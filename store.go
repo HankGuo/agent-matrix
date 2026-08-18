@@ -80,16 +80,20 @@ CREATE TABLE IF NOT EXISTS tasks (
     canceled_at INTEGER
 );
 -- 指派：一个任务 @ 多个 Agent，每个 Agent 一条，状态独立流转。
+-- 同一任务可多次追加指令（继续任务），每次追加是一轮（seq 递增）、每个目标 Agent 一条新指派；
+-- content 是本轮指令快照（首轮 = 任务正文）。OpenClaw 按任务 ID 绑定会话，追加轮自动带上上文。
 -- agent_id 不建外键：Agent 删除后指派保留为历史（状态置 canceled）。
 CREATE TABLE IF NOT EXISTS task_assignments (
     id           TEXT PRIMARY KEY,
     task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     agent_id     TEXT NOT NULL,
+    seq          INTEGER NOT NULL DEFAULT 1,
+    content      TEXT NOT NULL DEFAULT '',
     status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL DEFAULT 0,
     delivered_at INTEGER,
     result       TEXT NOT NULL DEFAULT '',
-    result_at    INTEGER,
-    UNIQUE(task_id, agent_id)
+    result_at    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_assign_agent ON task_assignments(agent_id, status);
 -- 附件：输入件挂在任务上（assignment_id 为空），产出件挂在指派上。
@@ -336,13 +340,16 @@ type Task struct {
 	CanceledAt *int64 `json:"canceled_at,omitempty"`
 }
 
-// Assignment 是任务指派给单个 Agent 的执行单元。
+// Assignment 是任务指派给单个 Agent 的执行单元。同一任务每轮追加产生一组新指派（Seq 递增）。
 type Assignment struct {
 	ID            string `json:"id"`
 	TaskID        string `json:"task_id"`
 	AgentID       string `json:"agent_id"`
 	AgentName     string `json:"agent_name"` // LEFT JOIN agents，空串表示 Agent 已删除
 	AgentLastSeen int64  `json:"-"`
+	Seq           int    `json:"seq"`
+	Content       string `json:"content"` // 本轮指令快照
+	CreatedAt     int64  `json:"created_at"`
 	Status        string `json:"status"`
 	DeliveredAt   *int64 `json:"delivered_at,omitempty"`
 	Result        string `json:"result,omitempty"`
@@ -363,7 +370,7 @@ func (s *store) agentsExist(ids []string) (bool, error) {
 	return true, nil
 }
 
-// createTask 在一个事务里创建任务及其全部指派。
+// createTask 在一个事务里创建任务及其全部首轮指派（seq=1，指令快照=任务正文）。
 func (s *store) createTask(title, content string, agentIDs []string) (*Task, error) {
 	t := &Task{ID: "tsk_" + randHex(8), Title: title, Content: content, CreatedAt: time.Now().Unix()}
 	tx, err := s.db.Begin()
@@ -375,14 +382,75 @@ func (s *store) createTask(title, content string, agentIDs []string) (*Task, err
 		t.ID, t.Title, t.Content, t.CreatedAt); err != nil {
 		return nil, err
 	}
+	now := time.Now().Unix()
 	for _, aid := range agentIDs {
 		if _, err := tx.Exec(
-			`INSERT INTO task_assignments (id, task_id, agent_id, status) VALUES (?,?,?,'pending')`,
-			"tsa_"+randHex(8), t.ID, aid); err != nil {
+			`INSERT INTO task_assignments (id, task_id, agent_id, seq, content, status, created_at) VALUES (?,?,?,1,?,'pending',?)`,
+			"tsa_"+randHex(8), t.ID, aid, content, now); err != nil {
 			return nil, err
 		}
 	}
 	return t, tx.Commit()
+}
+
+var errTaskCanceled = errors.New("任务已取消，不能继续追加")
+
+// createFollowup 给已有任务追加一轮指令：每个目标 Agent 生成 seq+1 的新指派。
+// agentIDs 为空时默认沿用该任务当前仍存在的全部 Agent。
+func (s *store) createFollowup(taskID, content string, agentIDs []string) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var canceledAt *int64
+	err = tx.QueryRow(`SELECT canceled_at FROM tasks WHERE id = ?`, taskID).Scan(&canceledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errTaskNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if canceledAt != nil {
+		return 0, errTaskCanceled
+	}
+	var seq int
+	if err := tx.QueryRow(
+		`SELECT COALESCE(MAX(seq), 0) + 1 FROM task_assignments WHERE task_id = ?`, taskID).Scan(&seq); err != nil {
+		return 0, err
+	}
+	if len(agentIDs) == 0 {
+		rows, err := tx.Query(
+			`SELECT DISTINCT a.agent_id FROM task_assignments a JOIN agents g ON g.id = a.agent_id
+			 WHERE a.task_id = ? ORDER BY a.agent_id`, taskID)
+		if err != nil {
+			return 0, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			agentIDs = append(agentIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+	}
+	if len(agentIDs) == 0 {
+		return 0, errAgentNotFound
+	}
+	now := time.Now().Unix()
+	for _, aid := range agentIDs {
+		if _, err := tx.Exec(
+			`INSERT INTO task_assignments (id, task_id, agent_id, seq, content, status, created_at) VALUES (?,?,?,?,?,'pending',?)`,
+			"tsa_"+randHex(8), taskID, aid, seq, content, now); err != nil {
+			return 0, err
+		}
+	}
+	return seq, tx.Commit()
 }
 
 // listTasks 返回最近的任务及其指派（按任务创建时间倒序，指派按创建顺序）。
@@ -409,17 +477,17 @@ func (s *store) listTasks(limit int) ([]Task, map[string][]Assignment, error) {
 
 	assigns := map[string][]Assignment{}
 	arows, err := s.db.Query(
-		`SELECT a.id, a.task_id, a.agent_id, COALESCE(g.name, ''), a.status,
+		`SELECT a.id, a.task_id, a.agent_id, COALESCE(g.name, ''), a.seq, a.content, a.created_at, a.status,
 		        a.delivered_at, a.result, a.result_at, COALESCE(g.last_seen, 0)
 		 FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
-		 ORDER BY a.rowid`)
+		 ORDER BY a.seq, a.rowid`)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer arows.Close()
 	for arows.Next() {
 		var a Assignment
-		if err := arows.Scan(&a.ID, &a.TaskID, &a.AgentID, &a.AgentName, &a.Status,
+		if err := arows.Scan(&a.ID, &a.TaskID, &a.AgentID, &a.AgentName, &a.Seq, &a.Content, &a.CreatedAt, &a.Status,
 			&a.DeliveredAt, &a.Result, &a.ResultAt, &a.AgentLastSeen); err != nil {
 			return nil, nil, err
 		}
@@ -518,10 +586,10 @@ func (s *store) pullAssignments(agentID string, limit int) ([]pulledTask, error)
 	}
 	defer tx.Rollback()
 	rows, err := tx.Query(
-		`SELECT a.id, a.task_id, t.title, t.content, t.created_at
+		`SELECT a.id, a.task_id, t.title, a.content, t.created_at
 		 FROM task_assignments a JOIN tasks t ON t.id = a.task_id
 		 WHERE a.agent_id = ? AND a.status = 'pending' AND t.canceled_at IS NULL
-		 ORDER BY t.created_at ASC, a.rowid ASC LIMIT ?`, agentID, limit)
+		 ORDER BY t.created_at ASC, a.seq ASC, a.rowid ASC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}

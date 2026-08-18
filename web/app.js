@@ -1,4 +1,4 @@
-/* Agent Matrix WebUI */
+/* Agent Matrix WebUI — 任务优先的双看板控制台 */
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
@@ -48,23 +48,51 @@ function showDash() {
   hideAll();
   dashView.hidden = false;
   topActions.hidden = false;
+  applyHash();
   loadAgents();
   loadTasks();
   refreshTimer = setInterval(() => {
     loadAgents();
     loadTasks();
+    if (currentTaskId && taskDetailPanel.classList.contains("show")) {
+      refreshTaskDetail();
+    }
   }, 15000);
 }
 
-/* ---- Agent / 任务 视图切换 ---- */
-let currentView = "agents";
+/* ---- 视图路由：#/tasks（默认）与 #/agents，支持 #/tasks/<id> 直达详情 ---- */
+let currentView = "tasks";
+
+function setView(v) {
+  currentView = v === "agents" ? "agents" : "tasks";
+  document.querySelectorAll("#dashTabs .tab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.view === currentView));
+  $("#agentsView").hidden = currentView !== "agents";
+  $("#tasksView").hidden = currentView !== "tasks";
+}
+
+function applyHash() {
+  const h = location.hash;
+  const m = h.match(/^#\/tasks\/(tsk_[0-9a-f]+)$/);
+  if (h.startsWith("#/agents")) {
+    setView("agents");
+  } else {
+    setView("tasks");
+  }
+  if (m) {
+    openTaskDetail(m[1], true);
+  } else if (currentTaskId) {
+    closePanels(); // 从详情退回列表（浏览器后退等）时关闭面板
+  }
+}
+
 document.querySelectorAll("#dashTabs .tab").forEach((btn) => {
   btn.addEventListener("click", () => {
-    currentView = btn.dataset.view;
-    document.querySelectorAll("#dashTabs .tab").forEach((b) => b.classList.toggle("active", b === btn));
-    $("#agentsView").hidden = currentView !== "agents";
-    $("#tasksView").hidden = currentView !== "tasks";
+    location.hash = "#/" + btn.dataset.view;
   });
+});
+window.addEventListener("hashchange", () => {
+  if (!dashView.hidden) applyHash();
 });
 
 /* ---- 初始化（首次访问强制设置账号） ---- */
@@ -139,9 +167,10 @@ $("#btnLogout").addEventListener("click", async () => {
   boot();
 });
 
-/* ---- Agent 列表 ---- */
+/* ---- 时间 ---- */
 
 function relTime(ts) {
+  if (!ts) return "-";
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
   if (diff < 10) return "刚刚";
   if (diff < 60) return diff + " 秒前";
@@ -155,6 +184,50 @@ function fmtTime(ts) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+
+/* ---- 状态元数据 ---- */
+
+const taskStatusMeta = {
+  pending: ["待执行", "gray"],
+  running: ["执行中", "amber"],
+  done: ["已完成", "green"],
+  partial: ["部分失败", "amber"],
+  failed: ["失败", "red"],
+  canceled: ["已取消", "gray"],
+};
+const asgStatusMeta = {
+  pending: ["待拉取", "gray"],
+  delivered: ["执行中", "amber"],
+  done: ["完成", "green"],
+  failed: ["失败", "red"],
+  canceled: ["已取消", "gray"],
+};
+// 看板分列：进行中 / 已完成 / 失败与取消
+const boardCols = { active: ["pending", "running"], done: ["done"], failed: ["failed", "partial", "canceled"] };
+
+function pill(meta) {
+  const s = document.createElement("span");
+  s.className = "pill " + (meta ? meta[1] : "gray");
+  s.textContent = meta ? meta[0] : "?";
+  return s;
+}
+
+/* 指派状态对应的语义灯 */
+function statusDot(status) {
+  const d = document.createElement("span");
+  d.className = "dot";
+  if (status === "done") d.classList.add("on");
+  else if (status === "delivered") d.classList.add("pulse");
+  else if (status === "failed") d.style.background = "var(--danger)";
+  else d.classList.add("off");
+  return d;
+}
+
+/* ---- 数据缓存 ---- */
+let agentsCache = [];
+let tasksCache = [];
+
+/* ---- Agent 看板 ---- */
 
 function skeleton() {
   const grid = $("#agentGrid");
@@ -174,9 +247,7 @@ function skeleton() {
 }
 
 async function loadAgents() {
-  if (firstLoad) {
-    skeleton();
-  }
+  if (firstLoad) skeleton();
   let data;
   try {
     const res = await api("/api/agents");
@@ -187,28 +258,43 @@ async function loadAgents() {
   } finally {
     firstLoad = false;
   }
-  const agents = data.agents || [];
+  agentsCache = data.agents || [];
+  renderAgents();
+}
+
+function renderAgents() {
+  const agents = agentsCache;
   const online = agents.filter((a) => a.online).length;
-  $("#statTotal").textContent = agents.length;
-  $("#statOnline").textContent = online;
-  $("#statOffline").textContent = agents.length - online;
-  const hasAgents = agents.length > 0;
-  $("#agentGrid").style.display = hasAgents ? "" : "none";
-  $("#emptyTip").hidden = hasAgents;
+  $("#agentStat").textContent = agents.length
+    ? `${agents.length} 台已纳管 · ${online} 在线 · ${agents.length - online} 离线`
+    : "";
   const now = new Date();
   const p = (n) => String(n).padStart(2, "0");
   const tip = `更新于 ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())} · 每 15 秒自动刷新`;
-  $("#syncTip").textContent = tip;
   $("#footSync").textContent = tip;
+
+  const hasAgents = agents.length > 0;
+  $("#agentGrid").style.display = hasAgents ? "" : "none";
+  $("#emptyTip").hidden = hasAgents;
 
   const grid = $("#agentGrid");
   grid.replaceChildren();
-  for (const a of agents) {
-    grid.append(agentCard(a));
-  }
+  for (const a of agents) grid.append(agentCard(a));
 }
 
-/* Agent 卡片（全端统一：响应式栅格自动伸缩） */
+/* Agent 的最近一条任务（跨任务取最新一轮指派） */
+function latestAssignmentOf(agentID) {
+  let best = null;
+  for (const t of tasksCache) {
+    for (const a of t.assignments || []) {
+      if (a.agent_id !== agentID) continue;
+      const key = t.created_at * 1000 + a.seq;
+      if (!best || key > best.key) best = { key, task: t, asg: a };
+    }
+  }
+  return best;
+}
+
 function agentCard(a) {
   const card = document.createElement("div");
   card.className = "acard" + (a.online ? "" : " off");
@@ -220,12 +306,12 @@ function agentCard(a) {
   nm.textContent = a.name;
   nm.title = a.name;
   const chip = document.createElement("span");
-  chip.className = "status-chip " + (a.online ? "on" : "off");
-  const dot = document.createElement("span");
-  dot.className = "dot " + (a.online ? "on" : "off");
+  chip.className = "status-chip";
+  chip.append(a.online ? Object.assign(document.createElement("span"), { className: "dot on" })
+                       : Object.assign(document.createElement("span"), { className: "dot off" }));
   const st = document.createElement("span");
   st.textContent = a.online ? "在线" : "离线";
-  chip.append(dot, st);
+  chip.append(st);
   head.append(nm, chip);
 
   const idLine = document.createElement("div");
@@ -239,7 +325,6 @@ function agentCard(a) {
     ["系统", a.os ? `${a.os}/${a.arch || "?"}` : "-"],
     ["IP", a.ip || "-"],
     ["最后心跳", relTime(a.last_seen)],
-    ["注册时间", fmtTime(a.created_at)],
   ];
   for (const [k, v] of fields) {
     const wrap = document.createElement("div");
@@ -251,6 +336,31 @@ function agentCard(a) {
     meta.append(wrap);
   }
 
+  // 最近任务行：Agent 视角的「它在干什么」
+  const taskLine = document.createElement("div");
+  taskLine.className = "acard-task";
+  const last = latestAssignmentOf(a.id);
+  if (last) {
+    taskLine.append(statusDot(last.asg.status));
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = last.task.title;
+    t.title = last.task.title;
+    const tm = document.createElement("span");
+    tm.className = "tcard-time";
+    tm.textContent = relTime(last.asg.result_at || last.asg.delivered_at || last.task.created_at);
+    taskLine.append(t, tm);
+    taskLine.style.cursor = "pointer";
+    taskLine.addEventListener("click", () => {
+      location.hash = "#/tasks/" + last.task.id;
+    });
+  } else {
+    const none = document.createElement("span");
+    none.className = "none";
+    none.textContent = "暂无任务";
+    taskLine.append(none);
+  }
+
   const foot = document.createElement("div");
   foot.className = "acard-foot";
   const del = document.createElement("button");
@@ -259,14 +369,8 @@ function agentCard(a) {
   del.addEventListener("click", () => removeAgent(a));
   foot.append(del);
 
-  card.append(head, idLine, meta, foot);
+  card.append(head, idLine, meta, taskLine, foot);
   return card;
-}
-
-function td(text) {
-  const el = document.createElement("td");
-  el.textContent = text;
-  return el;
 }
 
 async function removeAgent(a) {
@@ -275,7 +379,7 @@ async function removeAgent(a) {
   if (res.ok) loadAgents();
 }
 
-/* ---- 接入新 Agent（右侧滑出面板） ---- */
+/* ---- 面板开关 ---- */
 
 const panel = $("#enrollPanel");
 const panelMask = $("#panelMask");
@@ -298,6 +402,10 @@ function closePanels() {
   taskNewPanel.classList.remove("show");
   taskDetailPanel.classList.remove("show");
   panelMask.classList.remove("show");
+  if (currentTaskId) {
+    currentTaskId = null;
+    if (location.hash.startsWith("#/tasks/")) location.hash = "#/tasks";
+  }
 }
 
 $("#btnNew").addEventListener("click", openPanel);
@@ -373,38 +481,18 @@ $("#btnCopy").addEventListener("click", async () => {
   setTimeout(() => (btn.textContent = "复制指令"), 2000);
 });
 
-/* ---- 任务 ---- */
+/* ---- 任务看板 ---- */
 
-const taskStatusMeta = {
-  pending: ["待执行", "gray"],
-  running: ["执行中", "amber"],
-  done: ["已完成", "green"],
-  partial: ["部分失败", "amber"],
-  failed: ["失败", "red"],
-  canceled: ["已取消", "gray"],
-};
-const asgStatusMeta = {
-  pending: ["待拉取", "gray"],
-  delivered: ["执行中", "amber"],
-  done: ["完成", "green"],
-  failed: ["失败", "red"],
-  canceled: ["已取消", "gray"],
-};
+let currentSeg = "active";
 
-function pill(meta) {
-  const s = document.createElement("span");
-  s.className = "pill " + (meta ? meta[1] : "gray");
-  s.textContent = meta ? meta[0] : "?";
-  return s;
-}
-
-function assigneeText(t) {
-  return (t.assignments || [])
-    .map((a) => a.agent_name + (a.stale ? "（疑似卡住）" : ""))
-    .join("、");
-}
-
-let tasksFirstLoad = true;
+document.querySelectorAll("#taskSeg .seg-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    currentSeg = btn.dataset.col;
+    document.querySelectorAll("#taskSeg .seg-btn").forEach((b) =>
+      b.classList.toggle("active", b === btn));
+    renderMobileCol();
+  });
+});
 
 async function loadTasks() {
   let data;
@@ -414,95 +502,131 @@ async function loadTasks() {
     data = await res.json();
   } catch {
     return;
-  } finally {
-    tasksFirstLoad = false;
   }
-  const tasks = data.tasks || [];
-  const running = tasks.filter((t) => t.status === "running" || t.status === "pending").length;
-  $("#taskStat").textContent = tasks.length
-    ? `共 ${tasks.length} 个任务 · ${running} 个进行中`
-    : "";
-  const has = tasks.length > 0;
-  $("#taskTableWrap").style.display = has ? "" : "none";
-  $("#taskCards").style.display = has ? "" : "none";
-  $("#taskEmpty").hidden = has;
-
-  const tbody = $("#taskRows");
-  const cards = $("#taskCards");
-  tbody.replaceChildren();
-  cards.replaceChildren();
-  for (const t of tasks) {
-    const tr = document.createElement("tr");
-
-    const status = document.createElement("td");
-    status.append(pill(taskStatusMeta[t.status]));
-
-    const title = document.createElement("td");
-    const titleDiv = document.createElement("div");
-    titleDiv.className = "agent-name";
-    titleDiv.textContent = t.title;
-    const idDiv = document.createElement("div");
-    idDiv.className = "sub mono";
-    idDiv.textContent = t.id;
-    title.append(titleDiv, idDiv);
-
-    const assignees = td(assigneeText(t) || "-");
-    assignees.className = "task-assignees";
-    const created = td(fmtTime(t.created_at));
-    created.className = "sub col-created";
-
-    const ops = document.createElement("td");
-    const view = document.createElement("button");
-    view.className = "btn text";
-    view.textContent = "详情";
-    view.addEventListener("click", () => openTaskDetail(t.id));
-    ops.append(view);
-
-    tr.append(status, title, assignees, created, ops);
-    tbody.append(tr);
-    cards.append(taskCard(t));
-  }
+  tasksCache = data.tasks || [];
+  renderBoard();
+  if (agentsCache.length) renderAgents(); // Agent 卡片的“最近任务”依赖任务数据
 }
 
-/* 移动端任务卡片 */
-function taskCard(t) {
-  const card = document.createElement("div");
-  card.className = "acard";
-
-  const head = document.createElement("div");
-  head.className = "acard-head";
-  head.append(pill(taskStatusMeta[t.status]));
-  const nm = document.createElement("span");
-  nm.className = "acard-name";
-  nm.textContent = t.title;
-  const view = document.createElement("button");
-  view.className = "btn text";
-  view.textContent = "详情";
-  view.addEventListener("click", () => openTaskDetail(t.id));
-  head.append(nm, view);
-
-  const meta = document.createElement("dl");
-  meta.className = "acard-meta";
-  const fields = [
-    ["指派给", assigneeText(t) || "-"],
-    ["创建时间", fmtTime(t.created_at)],
-  ];
-  for (const [k, v] of fields) {
-    const wrap = document.createElement("div");
-    const dtx = document.createElement("dt");
-    dtx.textContent = k;
-    const dd = document.createElement("dd");
-    dd.textContent = v;
-    wrap.append(dtx, dd);
-    meta.append(wrap);
+/* 任务卡的最近活动时间 */
+function taskActivity(t) {
+  let ts = t.created_at;
+  for (const a of t.assignments || []) {
+    if (a.delivered_at && a.delivered_at > ts) ts = a.delivered_at;
+    if (a.result_at && a.result_at > ts) ts = a.result_at;
   }
+  return ts;
+}
 
-  card.append(head, meta);
+/* 每个 Agent 最新一轮的指派（卡片上只展示最新状态） */
+function latestPerAgent(t) {
+  const byAgent = {};
+  for (const a of t.assignments || []) {
+    if (!byAgent[a.agent_id] || a.seq > byAgent[a.agent_id].seq) byAgent[a.agent_id] = a;
+  }
+  return Object.values(byAgent).sort((x, y) => x.agent_name.localeCompare(y.agent_name));
+}
+
+function maxSeq(t) {
+  let s = 0;
+  for (const a of t.assignments || []) if (a.seq > s) s = a.seq;
+  return s;
+}
+
+function taskCardEl(t) {
+  const card = document.createElement("div");
+  card.className = "tcard";
+  card.addEventListener("click", () => {
+    location.hash = "#/tasks/" + t.id;
+  });
+
+  const top = document.createElement("div");
+  top.className = "tcard-top";
+  const title = document.createElement("div");
+  title.className = "tcard-title";
+  title.textContent = t.title;
+  top.append(title, pill(taskStatusMeta[t.status]));
+
+  const snippet = document.createElement("div");
+  snippet.className = "tcard-snippet";
+  snippet.textContent = t.content;
+
+  const foot = document.createElement("div");
+  foot.className = "tcard-foot";
+  const chips = document.createElement("div");
+  chips.className = "chips";
+  for (const a of latestPerAgent(t)) {
+    const c = document.createElement("span");
+    c.className = "chip";
+    c.title = a.agent_name + " · " + (asgStatusMeta[a.status] || [a.status])[0] + (a.stale ? " · 疑似卡住" : "");
+    c.append(statusDot(a.status));
+    const n = document.createElement("span");
+    n.textContent = a.agent_name;
+    c.append(n);
+    chips.append(c);
+  }
+  const right = document.createElement("span");
+  right.className = "tcard-time";
+  const rounds = maxSeq(t);
+  right.textContent = (rounds > 1 ? rounds + " 轮 · " : "") + relTime(taskActivity(t));
+  foot.append(chips, right);
+
+  card.append(top, snippet, foot);
   return card;
 }
 
-/* 新建任务 */
-let pendingAtts = []; // [{file, descEl}]
+function renderBoard() {
+  const tasks = tasksCache;
+  const n = { active: 0, done: 0, failed: 0 };
+  for (const t of tasks) {
+    for (const col in boardCols) if (boardCols[col].includes(t.status)) n[col]++;
+  }
+  $("#taskStat").textContent = tasks.length
+    ? `${n.active} 进行中 · ${n.done} 已完成 · ${n.failed} 失败/取消，共 ${tasks.length} 个任务`
+    : "";
+  $("#cntActive").textContent = n.active;
+  $("#cntDone").textContent = n.done;
+  $("#cntFailed").textContent = n.failed;
+  $("#segActive").textContent = n.active;
+  $("#segDone").textContent = n.done;
+  $("#segFailed").textContent = n.failed;
+
+  const has = tasks.length > 0;
+  $("#taskBoard").style.display = has ? "" : "none";
+  $("#taskSeg").style.display = has ? "" : "none";
+  $("#taskMobile").style.display = has ? "" : "none";
+  $("#taskEmpty").hidden = has;
+
+  const cols = { active: $("#colActive"), done: $("#colDone"), failed: $("#colFailed") };
+  for (const c in cols) cols[c].replaceChildren();
+  for (const t of tasks) {
+    for (const col in boardCols) {
+      if (boardCols[col].includes(t.status)) {
+        cols[col].append(taskCardEl(t));
+        break;
+      }
+    }
+  }
+  renderMobileCol();
+}
+
+function renderMobileCol() {
+  const box = $("#taskMobile");
+  box.replaceChildren();
+  for (const t of tasksCache) {
+    if (boardCols[currentSeg].includes(t.status)) box.append(taskCardEl(t));
+  }
+  if (!box.children.length && tasksCache.length) {
+    const p = document.createElement("p");
+    p.className = "muted small";
+    p.style.padding = "18px 6px";
+    p.textContent = "该状态下暂无任务";
+    box.append(p);
+  }
+}
+
+/* ---- 新建任务 ---- */
+let pendingAtts = [];
 
 function fmtSize(n) {
   return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB";
@@ -546,6 +670,21 @@ $("#attFile").addEventListener("change", (e) => {
   e.target.value = "";
 });
 
+function agentPickEl(a, checked) {
+  const lab = document.createElement("label");
+  lab.className = "pick";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.value = a.id;
+  cb.checked = checked;
+  const dot = document.createElement("span");
+  dot.className = "dot " + (a.online ? "on" : "off");
+  const nm = document.createElement("span");
+  nm.textContent = a.name + (a.online ? "" : "（离线）");
+  lab.append(cb, dot, nm);
+  return lab;
+}
+
 async function openTaskNew() {
   $("#taskTitle").value = "";
   $("#taskContent").value = "";
@@ -554,37 +693,13 @@ async function openTaskNew() {
   $("#attList").replaceChildren();
   const picker = $("#agentPicker");
   picker.replaceChildren();
-  let agents = [];
-  try {
-    const res = await api("/api/agents");
-    if (res.ok) agents = (await res.json()).agents || [];
-  } catch { /* 保持空 */ }
-  if (!agents.length) {
+  if (!agentsCache.length) {
     const p = document.createElement("p");
     p.className = "muted small";
     p.textContent = "还没有已接入的 Agent，请先在「Agent」页接入。";
     picker.append(p);
   }
-  for (const a of agents) {
-    const lab = document.createElement("label");
-    lab.className = "pick";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = a.id;
-    const dot = document.createElement("span");
-    dot.className = "dot " + (a.online ? "on" : "off");
-    const nm = document.createElement("span");
-    nm.className = "pick-name";
-    nm.textContent = a.name;
-    lab.append(cb, dot, nm);
-    if (!a.online) {
-      const off = document.createElement("span");
-      off.className = "sub small";
-      off.textContent = "离线";
-      lab.append(off);
-    }
-    picker.append(lab);
-  }
+  for (const a of agentsCache) picker.append(agentPickEl(a, false));
   taskNewPanel.classList.add("show");
   panelMask.classList.add("show");
   $("#taskTitle").focus();
@@ -642,22 +757,37 @@ $("#btnCreateTask").addEventListener("click", async () => {
     return;
   }
   closePanels();
-  if (currentView !== "tasks") $("#dashTabs .tab[data-view=tasks]").click();
+  // 直接进入新任务的详情线程
+  location.hash = "#/tasks/" + data.task.id;
   loadTasks();
 });
 
-/* 任务详情 */
+/* ---- 任务详情：按轮次的对话线程 ---- */
 let currentTaskId = null;
 
-async function openTaskDetail(id) {
+async function openTaskDetail(id, fromHash) {
   currentTaskId = id;
+  if (!fromHash && location.hash !== "#/tasks/" + id) {
+    location.hash = "#/tasks/" + id;
+  }
+  if (!agentsCache.length) await loadAgents(); // 继续任务的选择器需要 Agent 名单
   try {
     const res = await api("/api/tasks/" + encodeURIComponent(id));
     if (!res.ok) return;
-    renderTaskDetail(await res.json());
+    renderTaskDetail(await res.json(), true);
     taskDetailPanel.classList.add("show");
     panelMask.classList.add("show");
   } catch { /* 网络错误时保持现状 */ }
+}
+
+/* 面板打开时的静默刷新：保留滚动位置（本来在底部则贴底） */
+async function refreshTaskDetail() {
+  if (!currentTaskId) return;
+  try {
+    const res = await api("/api/tasks/" + encodeURIComponent(currentTaskId));
+    if (!res.ok) return;
+    renderTaskDetail(await res.json(), false);
+  } catch { /* 忽略 */ }
 }
 
 /* 附件条目：白名单类型内联预览，其余给下载链接 */
@@ -717,42 +847,78 @@ function attEl(a, idx) {
   return wrap;
 }
 
-function renderTaskDetail(d) {
+function renderTaskDetail(d, scrollToEnd) {
   $("#tdTitle").textContent = d.task.title;
-  const st = $("#tdStatus");
-  st.replaceChildren(pill(taskStatusMeta[d.status]));
+  $("#tdStatus").replaceChildren(pill(taskStatusMeta[d.status]));
+  $("#tdId").textContent = d.task.id;
   $("#tdTime").textContent =
     "创建于 " + fmtTime(d.task.created_at) +
-    (d.task.canceled_at ? " · 取消于 " + fmtTime(d.task.canceled_at) : "");
-  $("#tdContent").textContent = d.task.content;
+    (d.task.canceled_at ? "，取消于 " + fmtTime(d.task.canceled_at) : "");
 
-  const inputs = d.inputs || [];
-  $("#tdAttsWrap").hidden = inputs.length === 0;
-  const attBox = $("#tdAtts");
-  attBox.replaceChildren();
-  inputs.forEach((a, i) => attBox.append(attEl(a, i + 1)));
+  const body = $("#tdBody");
+  const stickToEnd = scrollToEnd || body.scrollHeight - body.scrollTop - body.clientHeight < 60;
 
-  const box = $("#tdAssigns");
-  box.replaceChildren();
-  const outputs = d.outputs || {};
+  // 按 seq 聚合成轮次
+  const rounds = new Map();
   for (const a of d.assignments || []) {
-    box.append(assignBlock(a, outputs[a.id] || []));
+    if (!rounds.has(a.seq)) rounds.set(a.seq, []);
+    rounds.get(a.seq).push(a);
   }
-  $("#btnCancelTask").hidden = ["done", "failed", "partial", "canceled"].includes(d.status);
+  const seqs = [...rounds.keys()].sort((x, y) => x - y);
+  const outputs = d.outputs || {};
+  const inputs = d.inputs || [];
+
+  const thread = $("#tdThread");
+  thread.replaceChildren();
+  for (const seq of seqs) {
+    const group = rounds.get(seq);
+    const roundEl = document.createElement("div");
+    roundEl.className = "round";
+
+    const label = document.createElement("div");
+    label.className = "round-label";
+    label.textContent = seqs.length > 1 ? "第 " + seq + " 轮 / 共 " + seqs.length + " 轮" : "任务指令";
+    roundEl.append(label);
+
+    const instr = document.createElement("div");
+    instr.className = "instr";
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = "你 · " + fmtTime(group[0].created_at || d.task.created_at);
+    instr.append(who, document.createTextNode(group[0].content));
+    roundEl.append(instr);
+
+    // 附件只在首轮指令下展示（输入件挂在任务上）
+    if (seq === 1 && inputs.length) {
+      inputs.forEach((a, i) => roundEl.append(attEl(a, i + 1)));
+    }
+
+    for (const a of group) roundEl.append(assignBlock(a, outputs[a.id] || []));
+    thread.append(roundEl);
+  }
+
+  const terminal = ["done", "failed", "partial", "canceled"].includes(d.status);
+  $("#btnCancelTask").hidden = terminal;
+  // 已取消的任务不能继续追加
+  $("#tdComposer").hidden = d.task.canceled_at != null;
+
+  // 继续任务的 Agent 选择器：默认勾选任务当前名单，可拉上其他在线 Agent
+  renderFollowupPicker(d);
+
+  if (stickToEnd) body.scrollTop = body.scrollHeight;
 }
 
 function assignBlock(a, outs) {
   const div = document.createElement("div");
-  div.className = "asgn";
+  div.className = "asgn st-" + a.status;
 
   const head = document.createElement("div");
   head.className = "asgn-head";
-  const dot = document.createElement("span");
-  dot.className = "dot " + (a.online ? "on" : "off");
+  head.append(statusDot(a.status));
   const nm = document.createElement("span");
   nm.className = "asgn-name";
-  nm.textContent = a.agent_name;
-  head.append(dot, nm, pill(asgStatusMeta[a.status]));
+  nm.textContent = a.agent_name + (a.online ? "" : "（离线）");
+  head.append(nm, pill(asgStatusMeta[a.status]));
   if (a.stale) head.append(pill(["疑似卡住", "amber"]));
 
   const times = document.createElement("p");
@@ -761,7 +927,7 @@ function assignBlock(a, outs) {
   if (a.delivered_at) parts.push("投递于 " + fmtTime(a.delivered_at));
   if (a.result_at) parts.push("回写于 " + fmtTime(a.result_at));
   if (!parts.length) parts.push("等待 Agent 拉取");
-  times.textContent = parts.join(" · ");
+  times.textContent = parts.join("，");
 
   div.append(head, times);
 
@@ -775,7 +941,7 @@ function assignBlock(a, outs) {
         body: "{}",
       });
       if (res.ok) {
-        openTaskDetail(currentTaskId);
+        refreshTaskDetail();
         loadTasks();
       }
     });
@@ -797,6 +963,73 @@ function assignBlock(a, outs) {
   return div;
 }
 
+/* 继续任务：选择器与提交 */
+function renderFollowupPicker(d) {
+  const picker = $("#fuPicker");
+  const inTask = new Set();
+  for (const a of d.assignments || []) inTask.add(a.agent_id);
+  // 已勾选的尽量保留（静默刷新时不打断用户编辑）
+  const prevChecked = new Set([...picker.querySelectorAll("input:checked")].map((i) => i.value));
+  const keep = picker.dataset.taskId === d.task.id && prevChecked.size > 0;
+  picker.dataset.taskId = d.task.id;
+  picker.replaceChildren();
+  for (const a of agentsCache) {
+    const checked = keep ? prevChecked.has(a.id) : inTask.has(a.id);
+    picker.append(agentPickEl(a, checked));
+  }
+  if (!agentsCache.length) {
+    const p = document.createElement("span");
+    p.className = "muted small";
+    p.textContent = "无可用 Agent";
+    picker.append(p);
+  }
+}
+
+$("#btnFollowup").addEventListener("click", async () => {
+  const errEl = $("#fuError");
+  errEl.hidden = true;
+  const content = $("#fuContent").value.trim();
+  if (!content) {
+    errEl.textContent = "先写点内容";
+    errEl.hidden = false;
+    return;
+  }
+  const ids = [...document.querySelectorAll("#fuPicker input:checked")].map((i) => i.value);
+  if (!ids.length) {
+    errEl.textContent = "至少勾选一个 Agent";
+    errEl.hidden = false;
+    return;
+  }
+  const btn = $("#btnFollowup");
+  btn.disabled = true;
+  btn.textContent = "发送中…";
+  let res;
+  try {
+    res = await api("/api/tasks/" + encodeURIComponent(currentTaskId) + "/followup", {
+      method: "POST",
+      body: JSON.stringify({ content, agent_ids: ids }),
+    });
+  } catch {
+    res = null;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "发送";
+  }
+  if (!res) {
+    errEl.textContent = "网络错误，请重试";
+    errEl.hidden = false;
+    return;
+  }
+  if (!res.ok) {
+    errEl.textContent = (await res.json()).error || "发送失败";
+    errEl.hidden = false;
+    return;
+  }
+  $("#fuContent").value = "";
+  refreshTaskDetail();
+  loadTasks();
+});
+
 $("#btnTdClose").addEventListener("click", closePanels);
 
 $("#btnDeleteTask").addEventListener("click", async () => {
@@ -814,13 +1047,13 @@ $("#btnDeleteTask").addEventListener("click", async () => {
 
 $("#btnCancelTask").addEventListener("click", async () => {
   if (!currentTaskId) return;
-  if (!confirm("确定取消该任务？所有未结束的指派都会终止。")) return;
+  if (!confirm("确定取消该任务？所有未结束的指派都会终止，且不能再追加新轮次。")) return;
   const res = await api("/api/tasks/" + encodeURIComponent(currentTaskId) + "/cancel", {
     method: "POST",
     body: "{}",
   });
   if (res.ok) {
-    openTaskDetail(currentTaskId);
+    refreshTaskDetail();
     loadTasks();
   }
 });
@@ -844,4 +1077,5 @@ async function boot() {
     showLogin(false);
   }
 }
+
 boot();

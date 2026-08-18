@@ -2,7 +2,7 @@
 
 [中文文档](README.md)
 
-A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access on the target machine. Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in its own channel (officially supporting OpenClaw's long-running Gateway and Hermes Agent's one-shot mode), and writes the result — plus any output files — back.
+A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access on the target machine. Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in its own channel (officially supporting OpenClaw's long-running Gateway and Hermes Agent), and writes the result — plus any output files — back. Tasks are not one-shot: from the detail page you can always append a new round of instructions ("继续任务"), and **the task ID doubles as the agent-side session key**, so every round of a task evolves inside the same conversation with continuous context.
 
 Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
 
@@ -90,6 +90,17 @@ Runner reliability: a directory lock prevents re-entry (tasks run serially; late
 - **Storage**: the default `local` driver streams bytes to `AGENT_MATRIX_ATTACH_DIR` (default: `attachments/` next to the DB), writes via temp-file + rename, and serves downloads with Range support (media scrubbing works); `AGENT_MATRIX_STORAGE` reserves an `s3` extension point (presigned direct transfer, not implemented yet)
 - **Security**: an agent can only download input files of tasks assigned to it; output uploads require a delivered assignment; the stored MIME is server-sniffed (client claims are not trusted); everything is served `attachment` by default, with inline preview only for an image/audio/video/PDF allowlist (plus a CSP sandbox); deleting a task or an agent cascades to its files
 
+### Follow-ups: rounds & session binding
+
+After creation, a task accepts new rounds anytime from the box at the bottom of its detail page ("继续任务"): each round creates one fresh assignment per target agent (`seq` increments, each round snapshots its own instruction, results write back independently), and past rounds remain visible as a conversation thread. A follow-up defaults to the task's existing agents; you can also tick extra agents to pull them in.
+
+**The task ID is the session ID.** How the two official executors bind it:
+
+- **OpenClaw**: the long-running Gateway natively supports session keys; every round runs `openclaw agent --session-key "matrix-<task-id>" --message …`, so the same task always continues the same session
+- **Hermes Agent**: wrapped by the setup.sh-generated `hermes-round.sh` — round one runs `hermes -z` to start a session and records the exact session_id from the usage report (`~/.agent-matrix/sessions/<task-id>`, also renamed to `matrix-<task-id>` so it is recognizable in `hermes sessions`); later rounds run `hermes chat -q --resume <sid>`. On older versions where session_id can't be read, it degrades to a fresh session per round without breaking execution
+
+Collected output files move into the `out/sent/` subdirectory after upload: later rounds never re-upload them, yet the session can still read and reference them.
+
 ### Assignment state machine
 
 ```mermaid
@@ -171,7 +182,7 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 
 - **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when `~/.agent-matrix/config` already exists — naturally idempotent, re-running means upgrading)
 - **Persist**: `~/.agent-matrix/config` (mode 600) with `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
-- **Detect the executor**: OpenClaw and Hermes Agent are the officially supported executors, probed in the order openclaw → hermes; or set `AM_RUN_TASK='…'` explicitly (`$1`=task content, `$2`=task ID tsk_…; with OpenClaw's long-running Gateway, `--session-key "matrix-$2"` gives one session per task)
+- **Detect the executor**: OpenClaw and Hermes Agent are the officially supported executors, probed in the order openclaw → hermes; OpenClaw uses `--session-key "matrix-$2"` for one session per task, Hermes goes through the generated `hermes-round.sh` wrapper (round one starts a session and archives its session_id, later rounds `--resume` it); or set `AM_RUN_TASK='…'` explicitly (`$1`=task content, `$2`=task ID tsk_…)
 - **Write two scripts**: `heartbeat.sh` and `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail)
 - **Install the per-minute scheduler**: macOS → two launchd plists (unload + load, idempotent); Linux → two merged cron lines or two systemd --user service+timer pairs; otherwise prints manual instructions (e.g. Windows)
 - **Self-check**: runs a real heartbeat, a real task pull, and the runner under an `env -i` narrow environment, then prints `AM_SETUP_DONE name=… sched=…`
@@ -179,11 +190,11 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 ## Features
 
 - **Prompt guidance + hosted installer**: the prompt is a dozen lines of guidance; all static logic lives in the server-hosted idempotent `setup.sh` — change the logic without touching prompts, and re-running it upgrades the agent to the latest runner
-- **Task dispatch (text + attachments)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; attachments ship with the task and outputs are collected automatically; stuck assignments can be manually requeued
+- **Task dispatch (text + attachments + follow-up rounds)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; the detail page lets you append rounds with the task ID bound to the agent session, so context stays continuous; attachments ship with the task and outputs are collected and archived automatically; stuck assignments can be manually requeued
 - **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
 - **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
 - **One-click decommission**: the agent vanishes from the list immediately; its token hash moves to a tombstone table (kept 30 days), and its next heartbeat gets a 410 that triggers self-uninstall (scheduler removed, `~/.agent-matrix` deleted; deferred while the runner is busy; a powered-off machine still cleans up on its first heartbeat after boot)
-- **Pure WebUI**: the control machine needs nothing but a browser; status dots and task progress auto-refresh every 15s
+- **Pure WebUI**: the control machine needs nothing but a browser; a task kanban (running / done / failed·canceled columns, segmented single column on mobile) plus a round-based conversation-thread detail view; status dots and task progress auto-refresh every 15s
 - **Cross-platform heartbeat**: the installer auto-detects Linux (cron / systemd user timer) and macOS (launchd), and prints manual instructions elsewhere
 - **Reliable deployment**: one static binary + one SQLite file under systemd; graceful shutdown, rate limiting, and security headers built in
 
@@ -252,7 +263,8 @@ WantedBy=multi-user.target
 3. The agent reports back the self-check output: registration result, executor command, scheduler type
 4. Back in the WebUI, a green dot means it's online
 5. Switch to the "任务" (Tasks) tab → new task → write title & content, tick one or more agents → create
-6. The agent pulls the task within a minute and executes autonomously; open "详情" (Detail) to see each agent's status and full result
+6. The agent pulls the task within a minute and executes autonomously; click a task card to open the detail thread and see each agent's status and full result per round
+7. To dig further, type a new instruction into "继续任务" at the bottom of the detail page and send: same task, same agent session, continuous context — or tick extra agents to pull them in
 
 > Note: the target agent must be able to **run shell commands and create scheduled jobs**. A chat-only agent (e.g. some vendor-hosted IM bots) cannot onboard itself — that's a mechanical constraint, not a configuration issue.
 
@@ -290,6 +302,7 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `GET` / `POST` | `/api/settings` | session cookie | Read / update the platform base URL |
 | `DELETE` | `/api/agents/{id}` | session cookie | Decommission agent (token tombstoned; its next heartbeat gets 410 → self-uninstall; unfinished assignments become canceled) |
 | `POST` | `/api/tasks` | session cookie | Create a task @ 1-20 agents (JSON for text-only, or multipart with ≤10 attachments of ≤100MB each, each with a caption) |
+| `POST` | `/api/tasks/{id}/followup` | session cookie | Append a round (`content` required; `agent_ids` defaults to the task's current agents), creating seq+1 assignments |
 | `GET` | `/api/tasks`, `/api/tasks/{id}` | session cookie | Task list / detail (detail includes full results and attachment lists) |
 | `POST` | `/api/tasks/{id}/cancel` | session cookie | Cancel task (unfinished assignments become canceled) |
 | `POST` | `/api/tasks/{id}/delete` | session cookie | Delete task (cascades to assignments, results and all attachment files; irreversible) |
@@ -299,7 +312,7 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 
 ## Scope
 
-Agent Matrix covers **registry + presence + task delivery (text and attachments)**. The task model is deliberately simple: one dispatch, one execution, one write-back — no DAG orchestration, no automatic retries. For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence and these files, collect the result"; the orchestrator answers "multi-step pipelines".
+Agent Matrix covers **registry + presence + task delivery (text and attachments)**. The task model is deliberately simple: one round, one execution, one write-back — and when you need more, append another round inside the same session. No DAG orchestration, no automatic retries. For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence and these files, collect the result"; the orchestrator answers "multi-step pipelines".
 
 ## License
 

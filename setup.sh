@@ -44,13 +44,14 @@ else
 fi
 
 # ---- 2) 选定任务执行命令（写入 config，之后改命令只需编辑 config） ----
-# 官方支持 OpenClaw 与 Hermes Agent 两家执行器，按顺序探测：
-#   openclaw: 走常驻 Gateway 的一个 agent turn，--session-key 按任务 ID 分会话
-#   hermes:   chat -q 一次性非交互模式，--quiet 抑制装饰输出，--source 打标便于过滤
+# 官方支持 OpenClaw 与 Hermes Agent 两家执行器，按顺序探测；两者都按任务 ID 绑定会话，
+# 同一任务的追加轮自动携带上文：
+#   openclaw: 走常驻 Gateway 的一个 agent turn，--session-key 即任务 ID
+#   hermes:   经 hermes-round.sh 包装——首轮 -z 建会话并记录 session_id，后续轮 --resume 续上
 RUN_TASK="${AM_RUN_TASK:-}"
 if [ -z "$RUN_TASK" ]; then
   if   command -v openclaw >/dev/null 2>&1; then RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1" --timeout 1800'
-  elif command -v hermes   >/dev/null 2>&1; then RUN_TASK='hermes chat -q "$1" --quiet --source matrix'
+  elif command -v hermes   >/dev/null 2>&1; then RUN_TASK="sh $DIR/hermes-round.sh \"\$1\" \"\$2\""
   else RUN_TASK='echo "未探测到 openclaw / hermes CLI：请先安装其一，或编辑 config 把 AM_RUN_TASK 改成你的一次性非交互执行命令（$1=任务内容 $2=任务ID）" >&2; exit 99'
   fi
 fi
@@ -170,7 +171,7 @@ for t in resp.get("tasks", []):
         manifest = "\n".join(lines)
 
     prompt = t["content"] + manifest
-    prompt += "\n\n## 产出\n如需产出文件，请写入目录 %s （执行结束后会被自动回收上传），并在结果文本中按文件名引用说明。" % outdir
+    prompt += "\n\n## 产出\n如需产出文件，请写入目录 %s （执行结束后会被自动回收上传，已回收的文件移入该目录的 sent/ 子目录，后续轮次仍可读取），并在结果文本中按文件名引用说明。" % outdir
 
     # AM_RUN_TASK 是 config 里的一次性非交互执行命令：$1=任务内容 $2=任务ID（tsk_…）
     p = subprocess.run(["/bin/sh", "-c", 'eval "$AM_RUN_TASK"', "run_task", prompt, tid],
@@ -179,8 +180,10 @@ for t in resp.get("tasks", []):
     output = p.stdout or ""
     st = "done" if p.returncode == 0 else "failed"
 
-    # 回收产出目录：逐个上传，失败不阻断结果回写
+    # 回收产出目录：逐个上传，成功后移入 sent/ 子目录（防后续轮次重复上传，文件仍可被读取）；
+    # 上传失败不阻断结果回写，文件留在原地，下轮再试。
     uploaded = []
+    sentdir = os.path.join(outdir, "sent")
     for fn in sorted(os.listdir(outdir)):
         fp = os.path.join(outdir, fn)
         if not os.path.isfile(fp):
@@ -191,6 +194,8 @@ for t in resp.get("tasks", []):
                             "-F", "file=@" + fp],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if r.returncode == 0:
+            os.makedirs(sentdir, exist_ok=True)
+            os.replace(fp, os.path.join(sentdir, aid + "-" + fn))
             uploaded.append(fn)
     if uploaded:
         output += "\n\n[已回收产出文件: " + ", ".join(uploaded) + "]"
@@ -204,7 +209,34 @@ PYEOF
 EOF
 mv -f "$DIR/.task-runner.sh.tmp" "$DIR/task-runner.sh"
 
-chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh"
+# Hermes 会话包装：同一任务 ID 绑定同一 Hermes 会话，追加轮自动续上文。
+# 首轮用 -z 建会话并从 usage 报告取精确 session_id 存档；后续轮 chat -q --resume 续上。
+# 取不到 session_id（老版本等）时退化为每轮新会话，不影响任务执行本身。
+cat > "$DIR/.hermes-round.sh.tmp" <<'EOF'
+#!/bin/sh
+# hermes-round.sh "<指令>" "<任务ID>"（由 Agent Matrix setup.sh 生成）
+MAP="$HOME/.agent-matrix/sessions"
+mkdir -p "$MAP"
+sidf="$MAP/$2"
+if [ -s "$sidf" ]; then
+  exec hermes chat -q "$1" --quiet --source agent-matrix --resume "$(cat "$sidf")"
+fi
+uf="$MAP/.$2.usage.json"
+hermes -z "$1" --usage-file "$uf"
+rc=$?
+sid=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("session_id") or "")
+except Exception: pass' "$uf" 2>/dev/null)
+rm -f "$uf"
+if [ -n "$sid" ]; then
+  printf '%s' "$sid" > "$sidf"
+  hermes sessions rename "$sid" "matrix-$2" >/dev/null 2>&1 || true
+fi
+exit $rc
+EOF
+mv -f "$DIR/.hermes-round.sh.tmp" "$DIR/hermes-round.sh"
+
+chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh"
 command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 整体依赖它"
 
 # ---- 5) 每分钟定时任务（heartbeat.sh 与 task-runner.sh 各一条） ----

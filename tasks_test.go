@@ -399,3 +399,113 @@ func TestDecommission(t *testing.T) {
 		t.Fatalf("重复下线应 404，实际 %d", code)
 	}
 }
+
+// TestTaskFollowup 继续任务：追加轮次、默认名单、逐轮独立回写。
+func TestTaskFollowup(t *testing.T) {
+	s, srv := newTestServer(t)
+	a1, tok1 := newAgent(t, s, "worker-1")
+	a2, tok2 := newAgent(t, s, "worker-2")
+	sess := adminSession(s)
+	taskID := createTask(t, srv, sess, a1.ID)
+
+	// 第 1 轮拉取并回写
+	got := pullTasks(t, srv, tok1)
+	asRound1 := got[0].(map[string]any)["assignment_id"].(string)
+	doJSON(t, "POST", srv.URL+"/api/agent/tasks/"+asRound1+"/result",
+		map[string]any{"status": "done", "result": "第一轮完成"}, "", tok1)
+
+	// 追加第 2 轮：不带 agent_ids，默认沿用任务现有 Agent（worker-1）
+	code, body := doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/followup",
+		map[string]any{"content": "再查一下内存占用"}, sess, "")
+	if code != http.StatusCreated {
+		t.Fatalf("追加轮次应 201，实际 %d: %s", code, body)
+	}
+	if seq := mustJSON(t, body)["seq"]; seq != float64(2) {
+		t.Fatalf("第 2 轮 seq 应为 2，实际 %v", seq)
+	}
+
+	// worker-1 拉到第 2 轮，内容为本轮指令而非任务正文
+	got = pullTasks(t, srv, tok1)
+	if len(got) != 1 {
+		t.Fatalf("应拉到 1 个新指派，实际 %d", len(got))
+	}
+	item := got[0].(map[string]any)
+	if item["content"] != "再查一下内存占用" {
+		t.Fatalf("第 2 轮指令快照不符: %v", item["content"])
+	}
+	if item["assignment_id"] == asRound1 {
+		t.Fatal("新一轮应是新的 assignment_id")
+	}
+	// worker-2 不在任务里，拉不到
+	if got2 := pullTasks(t, srv, tok2); len(got2) != 0 {
+		t.Fatalf("worker-2 不应有任务，实际 %d 个", len(got2))
+	}
+
+	// 第 3 轮：显式指定两个 Agent（拉新成员进场）
+	code, body = doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/followup",
+		map[string]any{"content": "两台都汇报一下负载", "agent_ids": []string{a1.ID, a2.ID}}, sess, "")
+	if code != http.StatusCreated || mustJSON(t, body)["seq"] != float64(3) {
+		t.Fatalf("第 3 轮应 201 且 seq=3，实际 %d: %s", code, body)
+	}
+	if got2 := pullTasks(t, srv, tok2); len(got2) != 1 || got2[0].(map[string]any)["content"] != "两台都汇报一下负载" {
+		t.Fatalf("worker-2 应拉到第 3 轮指令: %v", got2)
+	}
+
+	// 详情：3 轮指派按 seq 排列，各自携带本轮指令
+	_, body = doJSON(t, "GET", srv.URL+"/api/tasks/"+taskID, nil, sess, "")
+	as := mustJSON(t, body)["assignments"].([]any)
+	if len(as) != 4 {
+		t.Fatalf("共 4 条指派（1+1+2），实际 %d", len(as))
+	}
+	if as[0].(map[string]any)["seq"] != float64(1) || as[0].(map[string]any)["content"] != "检查磁盘占用并汇报" {
+		t.Fatalf("第 1 轮应保留原始指令: %v", as[0])
+	}
+	if as[1].(map[string]any)["seq"] != float64(2) || as[2].(map[string]any)["seq"] != float64(3) {
+		t.Fatalf("指派应按轮次升序: %v", as)
+	}
+
+	// 各轮独立回写：第 2 轮失败不影响第 1 轮的结果
+	asRound2 := as[1].(map[string]any)["id"].(string)
+	code, _ = doJSON(t, "POST", srv.URL+"/api/agent/tasks/"+asRound2+"/result",
+		map[string]any{"status": "failed", "result": "内存命令不存在"}, "", tok1)
+	if code != http.StatusOK {
+		t.Fatalf("第 2 轮回写应 200，实际 %d", code)
+	}
+	_, body = doJSON(t, "GET", srv.URL+"/api/tasks/"+taskID, nil, sess, "")
+	as = mustJSON(t, body)["assignments"].([]any)
+	if as[0].(map[string]any)["result"] != "第一轮完成" || as[1].(map[string]any)["status"] != "failed" {
+		t.Fatalf("跨轮回写串扰: %v / %v", as[0], as[1])
+	}
+}
+
+func TestTaskFollowupValidation(t *testing.T) {
+	s, srv := newTestServer(t)
+	a, _ := newAgent(t, s, "worker-1")
+	sess := adminSession(s)
+	taskID := createTask(t, srv, sess, a.ID)
+
+	// 空内容 / 任务不存在 / 不存在的 Agent / 未登录
+	if code, _ := doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/followup",
+		map[string]any{"content": "  "}, sess, ""); code != http.StatusBadRequest {
+		t.Fatalf("空内容应 400，实际 %d", code)
+	}
+	if code, _ := doJSON(t, "POST", srv.URL+"/api/tasks/tsk_nonexist/followup",
+		map[string]any{"content": "x"}, sess, ""); code != http.StatusNotFound {
+		t.Fatalf("任务不存在应 404，实际 %d", code)
+	}
+	if code, _ := doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/followup",
+		map[string]any{"content": "x", "agent_ids": []string{"am_ghost"}}, sess, ""); code != http.StatusBadRequest {
+		t.Fatalf("Agent 不存在应 400，实际 %d", code)
+	}
+	if code, _ := doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/followup",
+		map[string]any{"content": "x"}, "", ""); code != http.StatusUnauthorized {
+		t.Fatalf("未登录应 401，实际 %d", code)
+	}
+
+	// 已取消的任务不可追加
+	doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/cancel", nil, sess, "")
+	if code, _ := doJSON(t, "POST", srv.URL+"/api/tasks/"+taskID+"/followup",
+		map[string]any{"content": "x"}, sess, ""); code != http.StatusConflict {
+		t.Fatalf("已取消任务追加应 409，实际 %d", code)
+	}
+}

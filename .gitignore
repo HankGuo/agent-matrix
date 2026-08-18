@@ -3,3 +3,4 @@ attachments/
 *.db-shm
 *.db-wal
 agent-matrix
+agent-matrix-dev
