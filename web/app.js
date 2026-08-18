@@ -157,22 +157,9 @@ function fmtTime(ts) {
 }
 
 function skeleton() {
-  const tbody = $("#agentRows");
-  const cards = $("#agentCards");
-  tbody.replaceChildren();
-  cards.replaceChildren();
+  const grid = $("#agentGrid");
+  grid.replaceChildren();
   for (let i = 0; i < 3; i++) {
-    const tr = document.createElement("tr");
-    tr.className = "sk-row";
-    for (let c = 0; c < 8; c++) {
-      const td = document.createElement("td");
-      const bar = document.createElement("div");
-      bar.className = "sk";
-      bar.style.width = (55 + ((i * 7 + c * 13) % 40)) + "%";
-      td.append(bar);
-      tr.append(td);
-    }
-    tbody.append(tr);
     const card = document.createElement("div");
     card.className = "acard";
     const bar = document.createElement("div");
@@ -182,7 +169,7 @@ function skeleton() {
     bar2.className = "sk";
     bar2.style.cssText = "width:90%;margin-top:10px";
     card.append(bar, bar2);
-    cards.append(card);
+    grid.append(card);
   }
 }
 
@@ -206,8 +193,7 @@ async function loadAgents() {
   $("#statOnline").textContent = online;
   $("#statOffline").textContent = agents.length - online;
   const hasAgents = agents.length > 0;
-  document.querySelector(".table-scroll").style.display = hasAgents ? "" : "none";
-  $("#agentCards").style.display = hasAgents ? "" : "none";
+  $("#agentGrid").style.display = hasAgents ? "" : "none";
   $("#emptyTip").hidden = hasAgents;
   const now = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -215,72 +201,32 @@ async function loadAgents() {
   $("#syncTip").textContent = tip;
   $("#footSync").textContent = tip;
 
-  const tbody = $("#agentRows");
-  const cards = $("#agentCards");
-  tbody.replaceChildren();
-  cards.replaceChildren();
+  const grid = $("#agentGrid");
+  grid.replaceChildren();
   for (const a of agents) {
-    const tr = document.createElement("tr");
-
-    const status = document.createElement("td");
-    const dot = document.createElement("span");
-    dot.className = "dot " + (a.online ? "on" : "off");
-    const st = document.createElement("span");
-    st.className = "status-text " + (a.online ? "on" : "off");
-    st.textContent = a.online ? " 在线" : " 离线";
-    status.append(dot, st);
-
-    const name = document.createElement("td");
-    const nameDiv = document.createElement("div");
-    nameDiv.className = "agent-name";
-    nameDiv.textContent = a.name;
-    const idDiv = document.createElement("div");
-    idDiv.className = "sub mono";
-    idDiv.textContent = a.id;
-    name.append(nameDiv, idDiv);
-
-    const host = td(a.hostname || "-");
-    const os = td(a.os ? `${a.os}/${a.arch || "?"}` : "-");
-    const ip = td(a.ip || "-");
-    ip.className = "mono";
-    const seen = td(relTime(a.last_seen));
-    seen.title = fmtTime(a.last_seen);
-    const created = td(fmtTime(a.created_at));
-    created.className = "sub col-created";
-
-    const ops = document.createElement("td");
-    const del = document.createElement("button");
-    del.className = "btn danger";
-    del.textContent = "删除";
-    del.addEventListener("click", () => removeAgent(a));
-    ops.append(del);
-
-    tr.append(status, name, host, os, ip, seen, created, ops);
-    tbody.append(tr);
-    cards.append(agentCard(a));
+    grid.append(agentCard(a));
   }
 }
 
-/* 移动端卡片视图 */
+/* Agent 卡片（全端统一：响应式栅格自动伸缩） */
 function agentCard(a) {
   const card = document.createElement("div");
-  card.className = "acard";
+  card.className = "acard" + (a.online ? "" : " off");
 
   const head = document.createElement("div");
   head.className = "acard-head";
-  const dot = document.createElement("span");
-  dot.className = "dot " + (a.online ? "on" : "off");
-  const st = document.createElement("span");
-  st.className = "status-text " + (a.online ? "on" : "off");
-  st.textContent = a.online ? "在线" : "离线";
   const nm = document.createElement("span");
   nm.className = "acard-name";
   nm.textContent = a.name;
-  const del = document.createElement("button");
-  del.className = "btn danger";
-  del.textContent = "删除";
-  del.addEventListener("click", () => removeAgent(a));
-  head.append(dot, st, nm, del);
+  nm.title = a.name;
+  const chip = document.createElement("span");
+  chip.className = "status-chip " + (a.online ? "on" : "off");
+  const dot = document.createElement("span");
+  dot.className = "dot " + (a.online ? "on" : "off");
+  const st = document.createElement("span");
+  st.textContent = a.online ? "在线" : "离线";
+  chip.append(dot, st);
+  head.append(nm, chip);
 
   const idLine = document.createElement("div");
   idLine.className = "acard-id mono";
@@ -297,15 +243,23 @@ function agentCard(a) {
   ];
   for (const [k, v] of fields) {
     const wrap = document.createElement("div");
-    const dt = document.createElement("dt");
-    dt.textContent = k;
+    const dtx = document.createElement("dt");
+    dtx.textContent = k;
     const dd = document.createElement("dd");
     dd.textContent = v;
-    wrap.append(dt, dd);
+    wrap.append(dtx, dd);
     meta.append(wrap);
   }
 
-  card.append(head, idLine, meta);
+  const foot = document.createElement("div");
+  foot.className = "acard-foot";
+  const del = document.createElement("button");
+  del.className = "btn text acard-del";
+  del.textContent = "删除";
+  del.addEventListener("click", () => removeAgent(a));
+  foot.append(del);
+
+  card.append(head, idLine, meta, foot);
   return card;
 }
 

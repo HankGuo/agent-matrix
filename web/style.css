@@ -236,6 +236,57 @@ input:focus {
 }
 .table-scroll { overflow-x: auto; }
 .cards { display: none; }
+
+/* Agent 卡片栅格（全端统一，栅格自动伸缩） */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+  padding: 16px;
+}
+.acard {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.acard:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--line-strong);
+}
+.acard.off { opacity: 0.66; }
+.acard-head { display: flex; align-items: center; gap: 8px; }
+.acard-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.status-chip.on { color: var(--accent-ink); background: var(--accent-soft); }
+.status-chip.off { color: var(--muted); background: #f0eee8; }
+.acard-id { color: var(--muted); font-size: 11.5px; margin: 3px 0 10px; overflow-wrap: anywhere; }
+.acard-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+.acard-meta dt { color: var(--muted); font-size: 11.5px; letter-spacing: 0.04em; }
+.acard-meta dd { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.acard-meta > div:last-child { grid-column: 1 / -1; } /* 注册时间独占一行 */
+.acard-foot { display: flex; justify-content: flex-end; margin-top: 6px; }
+.acard-del { font-size: 12px; padding: 2px 6px; }
+.acard-del:hover { color: var(--danger); text-decoration: none; }
 .agents { width: 100%; border-collapse: collapse; }
 .agents th {
   text-align: left;
@@ -540,18 +591,7 @@ textarea:focus {
   /* 表格 → 卡片 */
   .table-scroll { display: none; }
   .cards { display: grid; gap: 12px; padding: 14px; }
-  .acard {
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    background: var(--surface);
-  }
-  .acard-head { display: flex; align-items: center; gap: 8px; }
-  .acard-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .acard-id { color: var(--muted); font-size: 11.5px; margin: 4px 0 10px; }
-  .acard-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
-  .acard-meta dt { color: var(--muted); font-size: 11.5px; letter-spacing: 0.04em; }
-  .acard-meta dd { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .agent-grid { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
 
   /* iOS 输入框小于 16px 会自动放大页面 */
   input, textarea { font-size: 16px; }
