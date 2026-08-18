@@ -184,7 +184,11 @@ export PATH
 . "$HOME/.agent-matrix/config"
 
 run_task() {
-  kimi -p "$1"    # ← 换成你自己的一次性非交互执行命令，例如 claude -p "$1"
+  kimi -p "$1"    # ← 换成你自己的一次性非交互执行命令，按你的 Agent 选一：
+                  #   kimi -p "$1"                          (Kimi CLI)
+                  #   claude -p "$1"                        (Claude Code)
+                  #   openclaw agent exec "$1"              (OpenClaw 官方 headless 入口，0=成功 1=错误 2=超时)
+                  #   hermes chat -q "$1" --quiet           (Hermes Agent one-shot 模式)
 }
 
 resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
