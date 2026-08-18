@@ -34,11 +34,12 @@ export PATH
 . "$HOME/.agent-matrix/config"
 
 run_task() {
-  kimi -p "$1"    # ← 换成你自己的一次性非交互执行命令，按你的 Agent 选一：
+  kimi -p "$1"    # ← 换成你自己的一次性非交互执行命令。参数：$1=任务内容 $2=任务ID（tsk_…，按任务维持会话时用）
+                  # 按你的 Agent 选一：
                   #   kimi -p "$1"                          (Kimi CLI)
                   #   claude -p "$1"                        (Claude Code)
-                  #   openclaw agent --session-key agent-matrix --message "$1" --timeout 1800
-                  #                                         (OpenClaw 已跑 Gateway 时推荐：走常驻服务，会话连续)
+                  #   openclaw agent --session-key "matrix-$2" --message "$1" --timeout 1800
+                  #                                         (OpenClaw 已跑 Gateway 时推荐：每个任务一个会话，同一任务的追问上下文连贯)
                   #   openclaw agent exec "$1"              (OpenClaw 无 Gateway 时：隔离 headless，0=成功 1=错误 2=超时)
                   #   hermes chat -q "$1" --quiet           (Hermes Agent one-shot 模式)
 }
@@ -47,10 +48,10 @@ resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_H
 printf '%s' "$resp" | python3 -c '
 import sys, json, base64
 for t in json.load(sys.stdin).get("tasks", []):
-    print(t["assignment_id"] + " " + base64.b64encode(t["content"].encode()).decode())
-' | while read -r aid b64; do
+    print(t["assignment_id"] + " " + t["task_id"] + " " + base64.b64encode(t["content"].encode()).decode())
+' | while read -r aid tid b64; do
   content=$(printf '%s' "$b64" | base64 -d)
-  output=$(run_task "$content" 2>&1) && st=done || st=failed
+  output=$(run_task "$content" "$tid" 2>&1) && st=done || st=failed
   payload=$(python3 -c 'import sys,json;print(json.dumps({"status":sys.argv[1],"result":sys.argv[2][-30000:]}))' "$st" "$output")
   curl -fsS -m 30 -X POST "$AM_URL/api/agent/tasks/$aid/result" \
     -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
