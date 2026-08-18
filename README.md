@@ -79,7 +79,9 @@ sequenceDiagram
 
 ## 任务派发（纯文本）
 
-管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent。Agent 复用心跳凭证**每分钟自行拉取**任务，在自己的通道里自治执行（OpenClaw / Hermes / 本地工具皆可），再把结果写回。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
+管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（`kimi -p` / `claude -p` 等，接入时由 Agent 自行填写），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙，不存在回调网络问题。
+
+执行器脚本的可靠性设计：目录锁防重入（任务串行执行，一个没跑完后续轮次自动跳过）、显式补全窄调度环境的 PATH、结果截取尾部 30KB 写回。
 
 ### 指派状态机
 
@@ -115,16 +117,16 @@ sequenceDiagram
     participant G as Agent（自治执行）
 
     A->>S: POST /api/tasks（标题 + 内容 + @ 1~20 个 Agent）
-    loop 每分钟（与心跳同一脚本）
+    loop 每分钟（task-runner.sh，目录锁防重入）
         G->>S: GET /api/agent/tasks（Bearer amh_…）
         S-->>G: 属于它的任务（原子置 delivered）
     end
-    G->>G: content 作为指令自治执行（OpenClaw / Hermes / 本地工具）
-    G->>S: POST /api/agent/tasks/{assignment_id}/result（done/failed + 结果文本）
+    G->>G: 调 Agent 的一次性 CLI 命令执行（kimi -p / claude -p / …）
+    G->>S: POST /api/agent/tasks/{assignment_id}/result（按退出码 done/failed + 输出尾部）
     A->>S: GET /api/tasks（WebUI 每 15s 轮询状态与结果）
 ```
 
-> v0.4 之前接入的老 Agent 没有任务接收循环：在 WebUI「设置」里点「生成补充指令」，把指令发给它即可补齐，**不需要重新注册**（指令不含密钥，凭证从它本机 `~/.agent-matrix/config` 读取）。
+> 较早接入的 Agent 没有任务执行器（或装着 v0.4 的 inbox 旧机制）：在 WebUI「设置」里点「生成补充指令」发给它即可安装/换装，**不需要重新注册**（指令不含密钥，凭证从它本机 `~/.agent-matrix/config` 读取）。
 
 ## 接入指令示例
 
@@ -165,39 +167,67 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
     . "$HOME/.agent-matrix/config"
     curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" >/dev/null 2>&1 || true
 
-## 步骤 4：安装每分钟定时任务（按操作系统选一种，已安装则跳过）
+## 步骤 4：任务执行器脚本
+平台管理员会向你派发任务。写入 $HOME/.agent-matrix/task-runner.sh 并 chmod +x。拉取、执行、回写全部机械化，不依赖你记住任何约定：
+
+```sh
+#!/bin/sh
+# task-runner.sh：拉取平台任务并执行，机械回写结果
+lockdir="$HOME/.agent-matrix/runner.lock"
+mkdir "$lockdir" 2>/dev/null || exit 0   # 一个任务没跑完，后续轮次直接跳过（串行执行）
+trap 'rmdir "$lockdir"' EXIT
+
+# 调度环境（cron/launchd/systemd）的 PATH 极窄，必须显式补全你 CLI 所在的目录
+PATH="$HOME/.kimi-code/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+export PATH
+
+. "$HOME/.agent-matrix/config"
+
+run_task() {
+  kimi -p "$1"    # ← 换成你自己的一次性非交互执行命令，例如 claude -p "$1"
+}
+
+resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
+printf '%s' "$resp" | python3 -c '
+import sys, json, base64
+for t in json.load(sys.stdin).get("tasks", []):
+    print(t["assignment_id"] + " " + base64.b64encode(t["content"].encode()).decode())
+' | while read -r aid b64; do
+  content=$(printf '%s' "$b64" | base64 -d)
+  output=$(run_task "$content" 2>&1) && st=done || st=failed
+  payload=$(python3 -c 'import sys,json;print(json.dumps({"status":sys.argv[1],"result":sys.argv[2][-30000:]}))' "$st" "$output")
+  curl -fsS -m 30 -X POST "$AM_URL/api/agent/tasks/$aid/result" \
+    -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
+    -d "$payload" || true
+done
+```
+
+规则：
+- run_task 必须换成你自己的一次性非交互执行命令（不许等待人工输入）；退出码非 0 视为失败，输出尾部 30KB 作为结果写回
+- 任务一经拉取即锁定给你，重复拉取不会重复返回；每个 assignment_id 只能成功写回一次
+- 没有 python3 就用 jq 或你可用的 JSON 工具改写解析部分，语义不变
+- Windows：用 PowerShell 写等价逻辑（Invoke-RestMethod 拉取与回写）
+
+## 步骤 5：安装每分钟定时任务（按操作系统选一种，已安装则跳过；heartbeat.sh 与 task-runner.sh 各装一条）
 - Linux 有 cron：执行
-    ( crontab -l 2>/dev/null | grep -v 'agent-matrix/heartbeat' ; echo "* * * * * $HOME/.agent-matrix/heartbeat.sh" ) | crontab -
-- Linux 无 cron 但有 systemd：创建 ~/.config/systemd/user/agent-matrix-heartbeat.service（ExecStart 指向上面的脚本）和同名 .timer（OnBootSec=60, OnUnitActiveSec=60），然后 systemctl --user daemon-reload && systemctl --user enable --now agent-matrix-heartbeat.timer
-- macOS：创建 ~/Library/LaunchAgents/com.agent-matrix.heartbeat.plist（ProgramArguments 指向脚本，StartInterval 为 60），然后 launchctl load 该 plist
-- Windows：写 heartbeat.ps1（用 Invoke-RestMethod 做同样的 POST），再 schtasks /create /tn "AgentMatrixHeartbeat" /sc minute /mo 1 /tr 指向它
-
-## 步骤 5：任务接收循环（接收平台派发的任务）
-平台管理员会向你派发任务。把「拉取」并入每分钟执行的心跳脚本，把「执行」留给你自己的主循环——任务耗时不可预估，绝不要在定时脚本里同步执行。
-
-在 heartbeat.sh 的心跳命令之后追加：
-
-    resp=$(curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null || true)
-    case "$resp" in *'"assignment_id"'*) printf '%s\n' "$resp" >> "$HOME/.agent-matrix/inbox.jsonl";; esac
-
-在你的主循环里消费 $HOME/.agent-matrix/inbox.jsonl：每行 JSON 的 tasks 数组含若干 {"assignment_id":"tsa_...","title":"...","content":"..."}。content 就是平台管理员发给你的指令本身，按你的能力执行它（可以调用 OpenClaw / Hermes / 本地工具，也可以直接处理），完成后写回结果并把这行从 inbox 移除：
-
-    curl -fsS -m 30 -X POST "$AM_URL/api/agent/tasks/<assignment_id>/result" \
-      -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
-      -d '{"status":"done","result":"<执行结果摘要，纯文本，≤32KB>"}'
-
-失败则 status 用 "failed" 并在 result 写明原因。规则：每个 assignment_id 只能成功写回一次；任务一经拉取即锁定给你，重复拉取不会重复返回；写回前必须已拉取。
+    ( crontab -l 2>/dev/null | grep -v 'agent-matrix/' ; printf '* * * * * %s\n* * * * * %s\n' "$HOME/.agent-matrix/heartbeat.sh" "$HOME/.agent-matrix/task-runner.sh" ) | crontab -
+- Linux 无 cron 但有 systemd：为 heartbeat.sh 和 task-runner.sh 各创建一对 ~/.config/systemd/user/agent-matrix-*.service + .timer（OnBootSec=60, OnUnitActiveSec=60），然后 systemctl --user daemon-reload 并 enable --now 两个 timer
+- macOS：为两个脚本各创建一个 ~/Library/LaunchAgents/com.agent-matrix.*.plist（StartInterval 为 60），分别 launchctl load
+- Windows：heartbeat.ps1 与 task-runner 的 PowerShell 等价物，各建一个每分钟触发的 schtasks
 
 ## 步骤 6：验证
 1. 手动执行一次 $HOME/.agent-matrix/heartbeat.sh（无输出即正常）。
 2. 再手动调一次心跳接口确认返回包含 "ok":true：
     . "$HOME/.agent-matrix/config" && curl -fsS -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN"
-3. 手动调一次任务拉取接口确认返回 JSON（没有任务时 tasks 为空数组）：
+3. 手动执行一次 $HOME/.agent-matrix/task-runner.sh（没有任务时应静默退出）。
+4. 模拟调度器的窄 PATH 环境再跑一次——交互 shell 里发现不了的环境问题靠这步抓：
+    env -i HOME="$HOME" /bin/sh "$HOME/.agent-matrix/task-runner.sh"
+5. 手动调一次任务拉取接口确认返回 JSON（没有任务时 tasks 为空数组）：
     . "$HOME/.agent-matrix/config" && curl -fsS "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN"
-4. 确认定时任务已存在（crontab -l / launchctl list / systemctl --user list-timers / schtasks /query 之一，按你的平台）。
+6. 确认两条定时任务都已存在（crontab -l / launchctl list / systemctl --user list-timers / schtasks /query 之一，按你的平台）。
 
 ## 步骤 7：向我汇报
-告诉我：注册是否成功、使用了哪种定时任务、验证结果。若任何一步失败，重试一次；仍失败则报告失败步骤和原始报错，不要静默跳过。
+告诉我：注册是否成功、使用了哪种定时任务、run_task 用的是哪条命令、验证结果。若任何一步失败，重试一次；仍失败则报告失败步骤和原始报错，不要静默跳过。
 ```
 
 </details>

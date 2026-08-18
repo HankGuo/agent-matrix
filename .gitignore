@@ -11,3 +11,7 @@ agent-matrix.db-shm
 # 编辑器
 .idea/
 .vscode/
+
+# 本机调试
+visual.db*
+dev-local.db*
