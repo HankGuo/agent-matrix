@@ -37,7 +37,9 @@ run_task() {
   kimi -p "$1"    # ← 换成你自己的一次性非交互执行命令，按你的 Agent 选一：
                   #   kimi -p "$1"                          (Kimi CLI)
                   #   claude -p "$1"                        (Claude Code)
-                  #   openclaw agent exec "$1"              (OpenClaw 官方 headless 入口，0=成功 1=错误 2=超时)
+                  #   openclaw agent --session-key agent-matrix --message "$1" --timeout 1800
+                  #                                         (OpenClaw 已跑 Gateway 时推荐：走常驻服务，会话连续)
+                  #   openclaw agent exec "$1"              (OpenClaw 无 Gateway 时：隔离 headless，0=成功 1=错误 2=超时)
                   #   hermes chat -q "$1" --quiet           (Hermes Agent one-shot 模式)
 }
 
