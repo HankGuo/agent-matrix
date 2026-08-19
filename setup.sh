@@ -301,8 +301,10 @@ mv -f "$DIR/.hermes-round.sh.tmp" "$DIR/hermes-round.sh"
 # OpenClaw 会话包装：同一任务 ID 绑定同一会话。版本适配不猜版本号，直接探测
 # agent --help 的参数面：
 #   有 --session-key（新版）：直接按 key 路由，matrix-<任务ID> 即会话
-#   无则降级（如 2026.4.x）：首轮 --to 派生会话、--json 输出里解析 sessionId 存档，
-#   后续轮 --session-id 续上；resume 失败删存档降级为首轮重跑，都不影响任务执行本身。
+#   有 --session-id（中版）：首轮 --to 派生、--json 输出里解析 sessionId 存档，
+#   后续轮 --session-id 续上；resume 失败删存档降级为首轮重跑
+#   只有 --to（旧版）：每轮 --to 派生，同 dest 尽力复用会话，无续写保证
+#   啥都没有：无法使用，报错退出
 cat > "$DIR/.openclaw-round.sh.tmp" <<'EOF'
 #!/bin/sh
 # openclaw-round.sh "<指令>" "<任务ID>"（由 Agent Matrix setup.sh 生成）
@@ -330,30 +332,28 @@ if has --session-key; then
   exit "$rc"
 fi
 
-# 旧版：--session-id 只能指向已存在的会话
-if ! has --session-id; then
-  echo "openclaw 版本过旧：agent 命令既无 --session-key 也无 --session-id，请升级 openclaw 后重跑 setup.sh" >&2
-  exit 99
-fi
+# 中版：有 --session-id，先尝试续上存档的会话
+if has --session-id; then
+  sid=""
+  [ -s "$sidf" ] && sid=$(cat "$sidf")
 
-sid=""
-[ -s "$sidf" ] && sid=$(cat "$sidf")
-
-if [ -n "$sid" ]; then
-  openclaw agent --session-id "$sid" --message "$1" $TIMEOUT >"$outf" 2>&1
-  if [ $? -eq 0 ]; then
-    show
-    exit 0
+  if [ -n "$sid" ]; then
+    openclaw agent --session-id "$sid" --message "$1" $TIMEOUT >"$outf" 2>&1
+    if [ $? -eq 0 ]; then
+      show
+      exit 0
+    fi
+    rm -f "$sidf"   # 会话已失效：降级为首轮重跑
   fi
-  rm -f "$sidf"   # 会话已失效：降级为首轮重跑
 fi
 
-# 首轮：--to 派生会话；支持 --json 时解析 sessionId 存档供后续轮续用
-if has --json; then
-  openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT --json >"$outf" 2>&1
-  rc=$?
-  show
-  sid=$(show | python3 -c 'import json,sys
+# 首轮或降级后：用 --to 派生会话；支持 --json 时解析 sessionId 存档供后续轮续用
+if has --to; then
+  if has --json; then
+    openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT --json >"$outf" 2>&1
+    rc=$?
+    show
+    sid=$(show | python3 -c 'import json,sys
 try:
   d=json.load(sys.stdin)
 except Exception:
@@ -361,15 +361,20 @@ except Exception:
 m=d.get("meta") or {}
 am=m.get("agentMeta") or {}
 print(d.get("sessionId") or am.get("sessionId") or m.get("sessionId") or "")' 2>/dev/null)
-  [ -n "$sid" ] && printf '%s' "$sid" > "$sidf"
+    [ -n "$sid" ] && printf '%s' "$sid" > "$sidf"
+    exit "$rc"
+  fi
+
+  # 连 --json 都没有：只能每轮 --to 派生（同 dest 派生同会话，尽力而为）
+  openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT >"$outf" 2>&1
+  rc=$?
+  show
   exit "$rc"
 fi
 
-# 连 --json 都没有：只能每轮 --to 派生（同 dest 派生同会话，尽力而为）
-openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT >"$outf" 2>&1
-rc=$?
-show
-exit "$rc"
+# 啥参数都没有
+echo "openclaw 版本过旧：agent 命令不支持 --session-key / --session-id / --to，请升级 openclaw 后重跑 setup.sh" >&2
+exit 99
 EOF
 mv -f "$DIR/.openclaw-round.sh.tmp" "$DIR/openclaw-round.sh"
 
