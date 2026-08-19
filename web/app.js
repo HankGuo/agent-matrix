@@ -299,6 +299,10 @@ function agentCard(a) {
   const card = document.createElement("div");
   card.className = "acard" + (a.online ? "" : " off");
 
+  // 能力画像（注册/升级时 Agent 自报的 meta JSON），容错解析
+  let metaInfo = {};
+  try { metaInfo = JSON.parse(a.meta || "{}"); } catch { metaInfo = {}; }
+
   const head = document.createElement("div");
   head.className = "acard-head";
   const nm = document.createElement("span");
@@ -318,9 +322,23 @@ function agentCard(a) {
   idLine.className = "acard-id mono";
   idLine.textContent = a.id;
 
+  // 人设：一句话能力描述，缺失则不占行
+  let persona = null;
+  if (metaInfo.persona) {
+    persona = document.createElement("div");
+    persona.className = "acard-persona";
+    persona.textContent = metaInfo.persona;
+    persona.title = metaInfo.persona;
+  }
+
   const meta = document.createElement("dl");
   meta.className = "acard-meta";
+  const execText = metaInfo.executor
+    ? metaInfo.executor + (metaInfo.executor_version ? " " + metaInfo.executor_version : "")
+    : "-";
   const fields = [
+    ["执行器", execText],
+    ["模型", metaInfo.model || "-"],
     ["主机", a.hostname || "-"],
     ["系统", a.os ? `${a.os}/${a.arch || "?"}` : "-"],
     ["IP", a.ip || "-"],
@@ -332,8 +350,26 @@ function agentCard(a) {
     dtx.textContent = k;
     const dd = document.createElement("dd");
     dd.textContent = v;
+    dd.title = v;
     wrap.append(dtx, dd);
     meta.append(wrap);
+  }
+
+  // 技能 chips
+  const skills = Array.isArray(metaInfo.skills) ? metaInfo.skills.slice(0, 20) : [];
+  let skillsEl = null;
+  if (skills.length) {
+    skillsEl = document.createElement("div");
+    skillsEl.className = "acard-skills";
+    for (const s of skills) {
+      const c = document.createElement("span");
+      c.className = "chip";
+      c.title = String(s);
+      const n = document.createElement("span");
+      n.textContent = String(s);
+      c.append(n);
+      skillsEl.append(c);
+    }
   }
 
   // 最近任务行：Agent 视角的「它在干什么」
@@ -369,7 +405,11 @@ function agentCard(a) {
   del.addEventListener("click", () => removeAgent(a));
   foot.append(del);
 
-  card.append(head, idLine, meta, taskLine, foot);
+  card.append(head, idLine);
+  if (persona) card.append(persona);
+  card.append(meta);
+  if (skillsEl) card.append(skillsEl);
+  card.append(taskLine, foot);
   return card;
 }
 

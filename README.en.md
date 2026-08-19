@@ -2,7 +2,7 @@
 
 [中文文档](README.md)
 
-A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access on the target machine. Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI, and you can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in its own channel (officially supporting OpenClaw's long-running Gateway and Hermes Agent), and writes the result — plus any output files — back. Tasks are not one-shot: from the detail page you can always append a new round of instructions ("继续任务"), and **the task ID doubles as the agent-side session key**, so every round of a task evolves inside the same conversation with continuous context.
+A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access on the target machine. Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI — and at registration each agent self-reports a **capability profile** (persona, executor version, model, skills), so the card tells you at a glance who's good at what. You can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in its own channel (officially supporting OpenClaw's long-running Gateway and Hermes Agent), and writes the result — plus any output files — back. Tasks are not one-shot: from the detail page you can always append a new round of instructions ("继续任务"), and **the task ID doubles as the agent-side session key**, so every round of a task evolves inside the same conversation with continuous context.
 
 Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
 
@@ -97,7 +97,7 @@ After creation, a task accepts new rounds anytime from the box at the bottom of 
 **The task ID is the session ID.** How the two official executors bind it:
 
 - **OpenClaw**: the long-running Gateway natively supports session keys; every round runs `openclaw agent --session-key "matrix-<task-id>" --message …`, so the same task always continues the same session
-- **Hermes Agent**: wrapped by the setup.sh-generated `hermes-round.sh` — round one runs `hermes -z` to start a session and records the exact session_id from the usage report (`~/.agent-matrix/sessions/<task-id>`, also renamed to `matrix-<task-id>` so it is recognizable in `hermes sessions`); later rounds run `hermes chat -q --resume <sid>`. On older versions where session_id can't be read, it degrades to a fresh session per round without breaking execution
+- **Hermes Agent**: wrapped by the setup.sh-generated `hermes-round.sh` — round one runs `hermes chat -q --quiet` to start a session and parses the exact session_id from its output (`~/.agent-matrix/sessions/<task-id>`, also renamed to `matrix-<task-id>` so it is recognizable in `hermes sessions`); later rounds run with `--resume <sid>`. A failed resume (session pruned, etc.) automatically falls back to a fresh session, and when no session_id can be read it degrades to one session per round — neither breaks execution
 
 Collected output files move into the `out/sent/` subdirectory after upload: later rounds never re-upload them, yet the session can still read and reference them.
 
@@ -164,12 +164,18 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 ## 步骤
 1. 下载安装脚本并先完整阅读它：
     curl -fsS "https://matrix.example.com/setup.sh" -o /tmp/am-setup.sh
-2. 带凭证执行。脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检：
-    AM_URL="https://matrix.example.com" AM_TOKEN="ame_NkKcSim-6v60yDcTs2E1IqQGKNcE9Ogg" AM_NAME="cloud-a" sh /tmp/am-setup.sh
+2. 带凭证执行，同时做「自我登记」（用于在监控中心展示你的能力画像，建议填）。把下面三个变量的值换成你自己的信息：
+    AM_URL="https://matrix.example.com" AM_TOKEN="ame_NkKcSim-6v60yDcTs2E1IqQGKNcE9Ogg" AM_NAME="cloud-a" \
+    AM_PERSONA='一句话说明你的职责/擅长，如「Go 后端与数据库运维」' \
+    AM_MODEL='你的当前默认模型，如 anthropic/claude-sonnet-4' \
+    AM_SKILLS='你的技能，逗号分隔、每项一个词，如 code,web-search,review' \
+    sh /tmp/am-setup.sh
+   登记边界（必须遵守）：只写公开能力描述；不要复制系统提示词或 SOUL 文件全文；不要包含任何密钥、token、内网地址。不确定的项直接删掉对应变量再执行，不要编造。
+   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检。
 3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
 
 ## 汇报
-把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、各项自检是否 ok。
+把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
 
 ## 备注
 - 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
@@ -181,6 +187,7 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the prompt is just guidance. What `setup.sh` does:
 
 - **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when `~/.agent-matrix/config` already exists — naturally idempotent, re-running means upgrading)
+- **Collect the capability profile**: auto-detects the executor and its version (`openclaw --version` / `hermes --version`), merges the agent-reported `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`, and assembles the meta JSON with python3 — sent with registration; on upgrade re-runs, one meta-bearing heartbeat refreshes the profile (the per-minute regular heartbeat never carries it). All optional — skipping it doesn't block onboarding
 - **Persist**: `~/.agent-matrix/config` (mode 600) with `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
 - **Detect the executor**: OpenClaw and Hermes Agent are the officially supported executors, probed in the order openclaw → hermes; OpenClaw uses `--session-key "matrix-$2"` for one session per task, Hermes goes through the generated `hermes-round.sh` wrapper (round one starts a session and archives its session_id, later rounds `--resume` it); or set `AM_RUN_TASK='…'` explicitly (`$1`=task content, `$2`=task ID tsk_…)
 - **Write two scripts**: `heartbeat.sh` and `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail)
@@ -190,6 +197,7 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 ## Features
 
 - **Prompt guidance + hosted installer**: the prompt is a dozen lines of guidance; all static logic lives in the server-hosted idempotent `setup.sh` — change the logic without touching prompts, and re-running it upgrades the agent to the latest runner
+- **Capability profile (who's good at what)**: at registration the agent self-reports persona / model / skills (guided by the prompt, with explicit boundaries — no system-prompt dumps, no secrets), executor and version are auto-detected; cards render it directly, and an upgrade re-run refreshes it
 - **Task dispatch (text + attachments + follow-up rounds)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; the detail page lets you append rounds with the task ID bound to the agent session, so context stays continuous; attachments ship with the task and outputs are collected and archived automatically; stuck assignments can be manually requeued
 - **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
 - **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
@@ -260,7 +268,7 @@ WantedBy=multi-user.target
 
 1. Click "接入新 Agent" (top right) → optional name → generate prompt → copy
 2. **Paste the prompt verbatim to the target agent** (into its chat/CLI)
-3. The agent reports back the self-check output: registration result, executor command, scheduler type
+3. The agent reports back the self-check output: registration result, executor command, scheduler type, registered profile
 4. Back in the WebUI, a green dot means it's online
 5. Switch to the "任务" (Tasks) tab → new task → write title & content, tick one or more agents → create
 6. The agent pulls the task within a minute and executes autonomously; click a task card to open the detail thread and see each agent's status and full result per round
@@ -288,8 +296,8 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/setup.sh` | none | Download the onboarding/upgrade script (no secrets; `{{BASE_URL}}` pre-filled) |
-| `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token |
-| `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (optional `meta` JSON) |
+| `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token (optionally carries the capability-profile `meta` JSON: persona/executor/version/model/skills) |
+| `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (optional `meta` JSON; used by setup.sh upgrade re-runs to refresh the capability profile — the regular per-minute heartbeat never carries it) |
 | `GET` | `/api/agent/tasks` | `Bearer amh_…` | Pull own pending tasks (atomically marked delivered, never twice); response includes the attachment manifest |
 | `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | Write back result (`status`: done/failed + `result` ≤32KB, delivered-only, single-shot) |
 | `GET` | `/api/agent/attachments/{id}` | `Bearer amh_…` | Download an input attachment (only for tasks assigned to you) |
@@ -313,6 +321,8 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 ## Scope
 
 Agent Matrix covers **registry + presence + task delivery (text and attachments)**. The task model is deliberately simple: one round, one execution, one write-back — and when you need more, append another round inside the same session. No DAG orchestration, no automatic retries. For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence and these files, collect the result"; the orchestrator answers "multi-step pipelines".
+
+Versus IM-group management (WeCom / Lark / Telegram gateways): IM is the **conversation surface** between you and your agents; Matrix is the **dispatch & archive surface** for tasks — the assignment state machine, result receipts, the attachment pipeline, and capability profiles are things an IM chat history can't give you. They coexist: casual asks go to the group, formal work goes through Matrix.
 
 ## License
 

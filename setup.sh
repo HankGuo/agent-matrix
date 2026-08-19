@@ -28,14 +28,45 @@ case "$AM_URL" in *"{{"*) die "AM_URL 未设置：请通过 GET /setup.sh 下载
 command -v curl >/dev/null 2>&1 || die "需要 curl"
 mkdir -p "$DIR" && chmod 700 "$DIR"
 
-# ---- 1) 注册（已有配置则跳过） ----
+# ---- 1) 能力画像采集（随注册上报、随升级刷新，全部可选） ----
+# 执行器与版本自动探测；人设/模型/技能由 Agent 通过 AM_PERSONA / AM_MODEL / AM_SKILLS 提供。
+# JSON 交给 python3 组装，避免 shell 拼串的引号注入；无 python3 则跳过画像（不影响接入）。
+EXECUTOR=""
+if   command -v openclaw >/dev/null 2>&1; then EXECUTOR=openclaw
+elif command -v hermes   >/dev/null 2>&1; then EXECUTOR=hermes
+fi
+EXECUTOR_VER=""
+[ -n "$EXECUTOR" ] && EXECUTOR_VER=$("$EXECUTOR" --version 2>/dev/null | head -1 | sed 's/^[^0-9]*//; s/[^0-9.].*$//')
+META=""
+if command -v python3 >/dev/null 2>&1; then
+  META=$(AM_PERSONA="${AM_PERSONA:-}" AM_MODEL="${AM_MODEL:-}" AM_SKILLS="${AM_SKILLS:-}" \
+    AM_EXECUTOR="$EXECUTOR" AM_EXECUTOR_VER="$EXECUTOR_VER" python3 - <<'PYMETA'
+import json, os
+def clip(v, n): return (v or "").strip()[:n]
+m = {}
+if clip(os.environ.get("AM_EXECUTOR"), 32):     m["executor"] = clip(os.environ["AM_EXECUTOR"], 32)
+if clip(os.environ.get("AM_EXECUTOR_VER"), 32): m["executor_version"] = clip(os.environ["AM_EXECUTOR_VER"], 32)
+if clip(os.environ.get("AM_PERSONA"), 200):     m["persona"] = clip(os.environ["AM_PERSONA"], 200)
+if clip(os.environ.get("AM_MODEL"), 64):        m["model"] = clip(os.environ["AM_MODEL"], 64)
+skills = [s for s in (clip(x, 32) for x in os.environ.get("AM_SKILLS", "").split(",")) if s][:20]
+if skills: m["skills"] = skills
+print(json.dumps(m, ensure_ascii=False))
+PYMETA
+  )
+fi
+
+# ---- 2) 注册（已有配置则跳过） ----
 if [ -s "$CFG" ]; then
   . "$CFG"
   say "== 已存在配置，跳过注册"
 else
   [ -n "$AM_TOKEN" ] || die "缺少 AM_TOKEN（一次性注册令牌）"
+  META_FIELD=""
+  if [ -n "$META" ] && [ "$META" != "{}" ]; then
+    META_FIELD=$(python3 -c 'import json,sys; print(",\"meta\":" + json.dumps(sys.argv[1], ensure_ascii=False))' "$META")
+  fi
   resp=$(curl -fsS -m 20 -X POST "$AM_URL/api/register" -H 'Content-Type: application/json' \
-    -d "{\"token\":\"$AM_TOKEN\",\"name\":\"$AM_NAME\",\"hostname\":\"$(hostname)\",\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"}") \
+    -d "{\"token\":\"$AM_TOKEN\",\"name\":\"$AM_NAME\",\"hostname\":\"$(hostname)\",\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"$META_FIELD}") \
     || die "注册失败（令牌无效、已用或过期）"
   HB=$(printf '%s' "$resp" | sed -n 's/.*"heartbeat_token":"\([^"]*\)".*/\1/p')
   [ -n "$HB" ] || die "注册响应缺少 heartbeat_token"
@@ -43,11 +74,11 @@ else
   say "== 注册成功"
 fi
 
-# ---- 2) 选定任务执行命令（写入 config，之后改命令只需编辑 config） ----
+# ---- 3) 选定任务执行命令（写入 config，之后改命令只需编辑 config） ----
 # 官方支持 OpenClaw 与 Hermes Agent 两家执行器，按顺序探测；两者都按任务 ID 绑定会话，
 # 同一任务的追加轮自动携带上文：
 #   openclaw: 走常驻 Gateway 的一个 agent turn，--session-key 即任务 ID
-#   hermes:   经 hermes-round.sh 包装——首轮 -z 建会话并记录 session_id，后续轮 --resume 续上
+#   hermes:   经 hermes-round.sh 包装——首轮 chat -q 建会话并记录 session_id，后续轮 --resume 续上
 RUN_TASK="${AM_RUN_TASK:-}"
 if [ -z "$RUN_TASK" ]; then
   if   command -v openclaw >/dev/null 2>&1; then RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1" --timeout 1800'
@@ -60,7 +91,7 @@ printf 'AM_URL=%s\nAM_HB_TOKEN=%s\nAM_RUN_TASK=%s\n' "$AM_URL" "$AM_HB_TOKEN" "'
 chmod 600 "$CFG"
 say "== 执行器: $RUN_TASK"
 
-# ---- 3) 心跳脚本 ----
+# ---- 4) 心跳脚本 ----
 # 临时文件 + mv 原子替换：本脚本可能被「自升级任务」触发，此时 heartbeat.sh / task-runner.sh
 # 可能正在运行；直接 cat > 截断改写会让运行中的 sh 实例读到错乱内容，mv 换 inode 则安全。
 # 心跳收到 410（已下线）时自卸载：runner 忙则本轮推迟；卸定时任务、删整个 ~/.agent-matrix。
@@ -94,7 +125,7 @@ cd / && rm -rf "$HOME/.agent-matrix"
 EOF
 mv -f "$DIR/.heartbeat.sh.tmp" "$DIR/heartbeat.sh"
 
-# ---- 4) 任务执行器 ----
+# ---- 5) 任务执行器 ----
 # shell 外壳负责目录锁/PATH/配置；主体逻辑在 python3 内嵌脚本里：
 # 拉取 → 下载附件并生成编号清单 → eval AM_RUN_TASK 执行 → 回收产出文件上传 → 按退出码机械回写。
 cat > "$DIR/.task-runner.sh.tmp" <<'EOF'
@@ -210,36 +241,46 @@ EOF
 mv -f "$DIR/.task-runner.sh.tmp" "$DIR/task-runner.sh"
 
 # Hermes 会话包装：同一任务 ID 绑定同一 Hermes 会话，追加轮自动续上文。
-# 首轮用 -z 建会话并从 usage 报告取精确 session_id 存档；后续轮 chat -q --resume 续上。
-# 取不到 session_id（老版本等）时退化为每轮新会话，不影响任务执行本身。
+# 首轮 hermes chat -q --quiet 建会话，从输出的 session_id 行取精确 ID 存档；
+# 后续轮 --resume 续上；resume 失败（会话被清理等）自动降级为新会话，
+# 取不到 session_id 时退化为每轮新会话，都不影响任务执行本身。
 cat > "$DIR/.hermes-round.sh.tmp" <<'EOF'
 #!/bin/sh
 # hermes-round.sh "<指令>" "<任务ID>"（由 Agent Matrix setup.sh 生成）
 MAP="$HOME/.agent-matrix/sessions"
 mkdir -p "$MAP"
 sidf="$MAP/$2"
-if [ -s "$sidf" ]; then
-  exec hermes chat -q "$1" --quiet --source agent-matrix --resume "$(cat "$sidf")"
+outf="$MAP/.$2.out"
+trap 'rm -f "$outf"' EXIT
+
+sid=""
+[ -s "$sidf" ] && sid=$(cat "$sidf")
+
+if [ -n "$sid" ]; then
+  hermes chat -q "$1" --quiet --source agent-matrix --resume "$sid" >"$outf" 2>&1
+  if [ $? -eq 0 ]; then
+    cat "$outf"
+    exit 0
+  fi
+  rm -f "$sidf"   # 会话已失效：按新会话重跑
 fi
-uf="$MAP/.$2.usage.json"
-hermes -z "$1" --usage-file "$uf"
+
+hermes chat -q "$1" --quiet --source agent-matrix >"$outf" 2>&1
 rc=$?
-sid=$(python3 -c 'import json,sys
-try: print(json.load(open(sys.argv[1])).get("session_id") or "")
-except Exception: pass' "$uf" 2>/dev/null)
-rm -f "$uf"
+cat "$outf"
+sid=$(sed -n 's/^session_id: //p' "$outf" | head -1)
 if [ -n "$sid" ]; then
   printf '%s' "$sid" > "$sidf"
   hermes sessions rename "$sid" "matrix-$2" >/dev/null 2>&1 || true
 fi
-exit $rc
+exit "$rc"
 EOF
 mv -f "$DIR/.hermes-round.sh.tmp" "$DIR/hermes-round.sh"
 
 chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh"
 command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 整体依赖它"
 
-# ---- 5) 每分钟定时任务（heartbeat.sh 与 task-runner.sh 各一条） ----
+# ---- 6) 每分钟定时任务（heartbeat.sh 与 task-runner.sh 各一条） ----
 SCHED="manual"
 if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   for unit in heartbeat task-runner; do
@@ -289,10 +330,19 @@ fi
 [ "$SCHED" = "manual" ] && say "== 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每分钟触发"
 say "== 定时任务: ${SCHED}（每分钟 × 2）"
 
-# ---- 6) 自检 ----
+# ---- 7) 自检 ----
 say "== 自检"
 curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" >/dev/null 2>&1 \
   && say "  心跳: ok" || say "  心跳: FAIL"
+# 能力画像刷新：注册时上报过一次；升级重跑（跳过注册）时借带 meta 的心跳更新一次。
+# 每分钟常规心跳不携带 meta，避免无谓流量。
+if [ -n "$META" ] && [ "$META" != "{}" ]; then
+  MBODY=$(python3 -c 'import json,sys; print(json.dumps({"meta": sys.argv[1]}, ensure_ascii=False))' "$META")
+  curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" \
+    -H 'Content-Type: application/json' -d "$MBODY" >/dev/null 2>&1 \
+    && say "  资料上报: ok" || say "  资料上报: FAIL（不影响使用，重跑本脚本可再试）"
+fi
+say "== 资料: executor=${EXECUTOR:-未知} version=${EXECUTOR_VER:-未知} model=${AM_MODEL:-未填} skills=${AM_SKILLS:-未填}"
 curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN" >/dev/null 2>&1 \
   && say "  任务拉取: ok" || say "  任务拉取: FAIL"
 # 模拟调度器的窄 PATH 环境（launchd 默认 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin）

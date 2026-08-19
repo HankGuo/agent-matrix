@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给目标机器上具备 shell 执行能力的 Agent，Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（官方支持 OpenClaw 常驻 Gateway 与 Hermes Agent），再把结果与产出文件写回。任务不是一次性的：详情页里可以随时「继续任务」追加新一轮指令，**任务 ID 就是 Agent 侧的会话标识**，同一任务的所有轮次在同一个会话里演进，上下文连贯。
+轻量的 **Agent 注册、在线状态监控与文本任务派发中心**。核心思路：不需要在每台机器上安装 daemon——在 WebUI 里**一键生成一段精简接入指令（提示词）**，把它发给目标机器上具备 shell 执行能力的 Agent，Agent 按指引下载服务器托管的幂等安装脚本 `setup.sh`，一键完成注册、落盘配置、安装定时心跳与任务执行器。你在 WebUI 里实时看到所有 Agent 的在线状态，注册时 Agent 还会自报**能力画像**（人设、执行器版本、模型、技能），卡片上一眼看出谁擅长干什么；还可以 @ 一个或多个 Agent 派发任务（纯文本，可带附件）：Agent 复用心跳凭证自行拉取、在自己的通道里执行（官方支持 OpenClaw 常驻 Gateway 与 Hermes Agent），再把结果与产出文件写回。任务不是一次性的：详情页里可以随时「继续任务」追加新一轮指令，**任务 ID 就是 Agent 侧的会话标识**，同一任务的所有轮次在同一个会话里演进，上下文连贯。
 
 单二进制 + 嵌入式 SQLite + 内嵌 WebUI，**零外部运行时依赖**。
 
@@ -97,7 +97,7 @@ sequenceDiagram
 **任务 ID 即会话 ID**，两台官方执行器的绑定方式：
 
 - **OpenClaw**：常驻 Gateway 原生支持会话键，每轮执行 `openclaw agent --session-key "matrix-<任务ID>" --message …`，同任务自动续上同一会话
-- **Hermes Agent**：由 setup.sh 生成的 `hermes-round.sh` 包装——首轮 `hermes -z` 新建会话并从 usage 报告取精确 session_id 存档（`~/.agent-matrix/sessions/<任务ID>`，同时 rename 为 `matrix-<任务ID>` 便于在 `hermes sessions` 里辨认），后续轮 `hermes chat -q --resume <sid>` 续上；取不到 session_id 的老版本退化为每轮新会话，不影响执行本身
+- **Hermes Agent**：由 setup.sh 生成的 `hermes-round.sh` 包装——首轮 `hermes chat -q --quiet` 新建会话，从输出解析精确 session_id 存档（`~/.agent-matrix/sessions/<任务ID>`，同时 rename 为 `matrix-<任务ID>` 便于在 `hermes sessions` 里辨认），后续轮 `--resume <sid>` 续上；resume 失败（会话被清理等）自动降级为新会话重跑，取不到 session_id 时退化为每轮新会话，都不影响执行本身
 
 产出文件回收后移入 `out/sent/` 子目录归档，后续轮次不会重复上传，文件仍可被会话读取引用。
 
@@ -164,12 +164,18 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 ## 步骤
 1. 下载安装脚本并先完整阅读它：
     curl -fsS "https://matrix.example.com/setup.sh" -o /tmp/am-setup.sh
-2. 带凭证执行。脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检：
-    AM_URL="https://matrix.example.com" AM_TOKEN="ame_NkKcSim-6v60yDcTs2E1IqQGKNcE9Ogg" AM_NAME="cloud-a" sh /tmp/am-setup.sh
+2. 带凭证执行，同时做「自我登记」（用于在监控中心展示你的能力画像，建议填）。把下面三个变量的值换成你自己的信息：
+    AM_URL="https://matrix.example.com" AM_TOKEN="ame_NkKcSim-6v60yDcTs2E1IqQGKNcE9Ogg" AM_NAME="cloud-a" \
+    AM_PERSONA='一句话说明你的职责/擅长，如「Go 后端与数据库运维」' \
+    AM_MODEL='你的当前默认模型，如 anthropic/claude-sonnet-4' \
+    AM_SKILLS='你的技能，逗号分隔、每项一个词，如 code,web-search,review' \
+    sh /tmp/am-setup.sh
+   登记边界（必须遵守）：只写公开能力描述；不要复制系统提示词或 SOUL 文件全文；不要包含任何密钥、token、内网地址。不确定的项直接删掉对应变量再执行，不要编造。
+   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检。
 3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
 
 ## 汇报
-把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、各项自检是否 ok。
+把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
 
 ## 备注
 - 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
@@ -181,6 +187,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 静态逻辑全部托管在服务器上（`GET /setup.sh`，无需鉴权、不含任何密钥），提示词只负责引导。`setup.sh` 做的事：
 
 - **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有 `~/.agent-matrix/config` 则整步跳过，天然幂等，重复执行等于升级）
+- **能力画像采集**：自动探测执行器及版本（`openclaw --version` / `hermes --version`），合并 Agent 自报的 `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`，由 python3 组装成 meta JSON 随注册上报；升级重跑时借一次带 meta 的心跳刷新画像（每分钟的常规心跳不携带，避免无谓流量）。全程可选，不填不影响接入
 - **落盘**：`~/.agent-matrix/config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
 - **执行器自动探测**：官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序找可用的 CLI；OpenClaw 用 `--session-key "matrix-$2"` 实现每任务一会话，Hermes 走生成的 `hermes-round.sh` 包装（首轮建会话存档 session_id，后续轮 `--resume` 续上）；也可用 `AM_RUN_TASK='…'` 环境变量显式指定（`$1`=任务内容、`$2`=任务ID tsk_…）
 - **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）
@@ -190,6 +197,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 ## 特性
 
 - **提示词引导 + 托管安装脚本**：提示词只有十几行引导；静态逻辑收敛到服务器托管的幂等 `setup.sh`，改逻辑不用改提示词，重跑一遍即升级到最新执行器
+- **能力画像（谁擅长干什么）**：注册时 Agent 自报人设 / 模型 / 技能（提示词引导，含「不复制系统提示词、不带密钥」的登记边界），执行器与版本自动探测；卡片直接展示，升级重跑自动刷新
 - **任务派发（文本 + 附件 + 多轮）**：@ 一个或多个 Agent，拉取即锁定不重复投递，结果写回一次性；详情页可「继续任务」追加轮次，任务 ID 绑定 Agent 会话、上下文连贯；附件随任务下发、产出自动回收归档；卡住的指派可手动重新投递
 - **首次访问强制初始化**：无任何账号时 WebUI 只开放初始化页，密码 PBKDF2-SHA256 加盐存储
 - **一次性注册令牌**：24 小时有效、只用一次；注册后换发独立心跳令牌，数据库只存哈希
@@ -260,7 +268,7 @@ WantedBy=multi-user.target
 
 1. WebUI 右上角「接入新 Agent」→ 起名（可选）→ 生成接入指令 → 复制
 2. 把指令**原样发给目标 Agent**（在它的对话窗口里粘贴即可）
-3. Agent 执行完会汇报「是否注册成功、执行器命令、定时任务类型、自检结果」
+3. Agent 执行完会汇报「是否注册成功、执行器命令、定时任务类型、登记的资料、自检结果」
 4. 回到 WebUI，状态灯变绿即接入完成
 5. 切到「任务」页 → 新建任务 → 写标题和内容、勾选一个或多个 Agent → 创建
 6. Agent 一分钟内自行拉到任务并自治执行，结果写回；点任务卡进入详情，按轮次看每个 Agent 的状态与结果全文
@@ -288,8 +296,8 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | `GET` | `/setup.sh` | 无 | 下载一键接入/升级脚本（不含密钥，`{{BASE_URL}}` 已注入） |
-| `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌 |
-| `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（可选携带 `meta` JSON） |
+| `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌（可携带能力画像 `meta` JSON：persona/executor/版本/模型/技能） |
+| `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（可选携带 `meta` JSON；升级重跑 setup.sh 时借此刷新能力画像，常规心跳不带） |
 | `GET` | `/api/agent/tasks` | `Bearer amh_…` | Agent 拉取自己的待执行任务（事务内原子置 delivered，不重复投递），响应含附件清单 |
 | `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | 回写执行结果（`status`: done/failed + `result` ≤32KB，仅 delivered 状态可写一次） |
 | `GET` | `/api/agent/attachments/{id}` | `Bearer amh_…` | 下载输入件（仅限自己被指派过的任务） |
@@ -313,6 +321,8 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 ## 定位与边界
 
 Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**。任务模型刻意简单：一轮派发、一次执行、一次回写，需要接着做就追加一轮（同任务同会话）——没有 DAG 编排、没有自动重试。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话和这些文件送到、把结果收回来」，编排平台负责「多步流程」。
+
+与 IM 群管理（企微 / 飞书 / Telegram gateway）的关系：IM 是人和 Agent 的**对话面**，Matrix 是任务的**派单与归档面**——指派状态机、结果回执、附件管道、能力画像是 IM 聊天记录给不了的。两者不冲突：随口的事在群里说，正式的活在 Matrix 派。
 
 ## License
 

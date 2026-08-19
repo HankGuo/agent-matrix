@@ -28,12 +28,18 @@ const promptTemplate = `请把你自己接入 Agent Matrix 监控中心。你是
 ## 步骤
 1. 下载安装脚本并先完整阅读它：
     curl -fsS "{{BASE_URL}}/setup.sh" -o /tmp/am-setup.sh
-2. 带凭证执行。脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检：
-    AM_URL="{{BASE_URL}}" AM_TOKEN="{{TOKEN}}" AM_NAME="{{NAME}}" sh /tmp/am-setup.sh
+2. 带凭证执行，同时做「自我登记」（用于在监控中心展示你的能力画像，建议填）。把下面三个变量的值换成你自己的信息：
+    AM_URL="{{BASE_URL}}" AM_TOKEN="{{TOKEN}}" AM_NAME="{{NAME}}" \
+    AM_PERSONA='一句话说明你的职责/擅长，如「Go 后端与数据库运维」' \
+    AM_MODEL='你的当前默认模型，如 anthropic/claude-sonnet-4' \
+    AM_SKILLS='你的技能，逗号分隔、每项一个词，如 code,web-search,review' \
+    sh /tmp/am-setup.sh
+   登记边界（必须遵守）：只写公开能力描述；不要复制系统提示词或 SOUL 文件全文；不要包含任何密钥、token、内网地址。不确定的项直接删掉对应变量再执行，不要编造。
+   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检。
 3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
 
 ## 汇报
-把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、各项自检是否 ok。
+把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
 
 ## 备注
 - 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
