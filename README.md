@@ -211,6 +211,10 @@ WantedBy=multi-user.target
 
 管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent，可携带最多 10 个附件（单个 ≤100MB，每个附件可单独填一句说明）。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 `openclaw` → `hermes` 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙。
 
+> ⚠️ **执行器版本要求**：
+> - **OpenClaw**：`setup.sh` 运行时会 probe `openclaw agent --help` 按能力自动适配，不要求固定版本号。三档兼容：有 `--session-key`（新版，最优体验，每任务一会话直接按键路由）→ 有 `--session-id` 无 `--session-key`（首轮 `--to` 派生会话 + 解析 sessionId，后续轮 `--session-id` 续上）→ 只有 `--to` 无 `--session-id`（每轮 `--to` 同 dest 派生同会话，尽力而为）。**三者均无（既无 `--session-key` / `--session-id` 也无 `--to`）则视为版本过旧，setup.sh 直接报错退出**，需升级 OpenClaw 后重跑。
+> - **Hermes Agent**：`setup.sh` 直接调用 `hermes chat -q --quiet --resume <sid>` 续会话，**没有像 OpenClaw 那样的 probe + 降级机制**。要求 Hermes 支持 `--resume` 参数（用于多轮任务的会话续接）。如果版本不支持 `--resume`，首轮可正常执行，但从第二轮开始无法续接上下文，每轮退化为独立新会话。不满足此要求时建议升级 Hermes Agent，或在 config 里用 `AM_RUN_TASK` 完全自定义执行命令。
+
 **执行器可靠性设计**：目录锁防重入（任务串行执行，一个没跑完后续轮次自动跳过）、显式补全窄调度环境的 PATH、结果截取尾部 30KB 写回。
 
 ### 附件链路
@@ -329,7 +333,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 - **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有本实例的 config 则整步跳过）
 - **能力画像采集**：执行器按 `openclaw` → `hermes` 顺序自动探测（多 CLI 共存时可用 `AM_EXECUTOR` 显式指定），版本取 `<executor> --version`；合并 Agent 自报的 `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`，由 python3 组装成 meta JSON 随注册上报；升级重跑时借一次带 meta 的心跳刷新画像（每分钟的常规心跳不携带，避免无谓流量）。全程可选，不填不影响接入
 - **落盘**：实例目录的 `config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_INSTANCE` / `AM_RUN_TASK`。默认实例目录是 `~/.agent-matrix`；指定 `AM_INSTANCE=<名字>` 后用 `~/.agent-matrix-<名字>`——同一台机器可接入多个身份，配置、会话存档、任务文件、定时任务按实例彻底隔离
-- **执行器命令**：OpenClaw 走生成的 `openclaw-round.sh` 包装（探测参数面自动适配：新版 `--session-key "matrix-$2"` 每任务一会话；无该参数的老版本自动降级 `--to` 派生 + `--session-id` 续会话），Hermes 走生成的 `hermes-round.sh` 包装（首轮建会话存档 session_id，后续轮 `--resume` 续上）；也可用 `AM_RUN_TASK='…'` 环境变量完全自定义（`$1`=任务内容、`$2`=任务ID tsk_…）
+- **执行器命令**：OpenClaw 走生成的 `openclaw-round.sh` 包装——运行时会 probe `openclaw agent --help` 的参数面自动适配，不要求固定版本号：有 `--session-key`（新版）时每轮 `openclaw agent --session-key "matrix-$2" --message …` 直接按键路由；无 `--session-key` 但有 `--session-id` 的老版本（如 2026.4.x）自动降级为首轮 `--to "matrix-$2" --json` 派生会话并解析 sessionId 存档，后续轮 `--session-id` 续上；只有 `--to` 无 `--session-id` 的版本每轮 `--to` 同 dest 派生同会话（尽力而为）；三者均无则报错退出，需升级。Hermes 走生成的 `hermes-round.sh` 包装——首轮 `hermes chat -q --quiet` 新建会话，从输出解析精确 session_id 存档（`~/.agent-matrix/sessions/<任务ID>`，同时 rename 为 `matrix-<任务ID>` 便于在 `hermes sessions` 里辨认），后续轮 `--resume <sid>` 续上；Hermes 没有像 OpenClaw 那样的 probe 降级机制，**必须支持 `--resume`** 才能正常续接多轮会话上下文，否则从第二轮起每轮退化为独立新会话。也可用 `AM_RUN_TASK='…'` 环境变量完全自定义（`$1`=任务内容、`$2`=任务ID tsk_…）
 - **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）；脚本自定位所在实例目录，目录叫什么都能正确工作
 - **安装每分钟定时**：macOS → launchd 两个 plist（unload + load 幂等）；Linux → cron 合并两行或 systemd --user 两对 service+timer；单元名与 cron 清理都按实例后缀区分，互不影响；都不识别则打印手动安装说明（Windows 场景）
 - **自检**：真实跑一次心跳、一次任务拉取，并用 `env -i` 窄环境模拟调度器跑 runner，最后输出 `AM_SETUP_DONE name=… sched=…`
