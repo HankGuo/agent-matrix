@@ -1,14 +1,60 @@
 # Agent Matrix
 
+[![Go](https://img.shields.io/badge/Go-1.26%2B-blue?logo=go)](https://go.dev/dl/) [![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE) [![Release](https://img.shields.io/github/v/release/HankGuo/agent-matrix)](https://github.com/HankGuo/agent-matrix/releases) [![Stars](https://img.shields.io/github/stars/HankGuo/agent-matrix?style=social)](https://github.com/HankGuo/agent-matrix)
+
 [中文文档](README.md)
 
-A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. The core idea: no daemon to install on every machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access on the target machine. Following the prompt, the agent downloads the server-hosted idempotent installer `setup.sh`, which performs registration, persists config, and installs the scheduled heartbeat and task runner in one shot. You watch every agent's live status in the WebUI — and at registration each agent self-reports a **capability profile** (persona, executor version, model, skills), so the card tells you at a glance who's good at what. You can @ one or more agents with a task (plain text, optionally with attachments): the agent pulls it on its own using the heartbeat credential, executes it in its own channel (officially supporting OpenClaw's long-running Gateway and Hermes Agent), and writes the result — plus any output files — back. Tasks are not one-shot: from the detail page you can always append a new round of instructions ("继续任务"), and **the task ID doubles as the agent-side session key**, so every round of a task evolves inside the same conversation with continuous context.
+<br>
 
-Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
+> A lightweight **agent registry, online-status monitor, and plain-text task dispatcher**. No daemon to install on any machine — generate a **short onboarding prompt** in the WebUI and hand it to the agent with shell access. The agent downloads the server-hosted idempotent installer `setup.sh`, registers, persists config, and installs heartbeat + task runner in one shot. The admin console is pure browser; the agent side is pure outbound access.
 
-![Agent Matrix topology: browser admin, single-binary server, outbound-only agents](docs/topology.svg)
+<br>
 
-## Architecture
+<img src="docs/topology.svg" alt="Topology: browser admin, single-binary server, outbound-only agents" width="100%">
+
+<br>
+
+<!-- TOC -->
+
+## 📖 Table of Contents
+
+- [🎯 Features](#-features)
+- [🧩 Architecture](#-architecture)
+- [📋 Onboarding Flow](#-onboarding-flow)
+- [⚡ Quick Start](#-quick-start)
+  - [Build](#build)
+  - [Run](#run)
+  - [Environment Variables](#environment-variables)
+  - [Production Deployment](#production-deployment)
+- [📝 Usage](#-usage)
+- [📬 Task Dispatch](#-task-dispatch)
+  - [Attachment Pipeline](#attachment-pipeline)
+  - [Multi-Round & Session Binding](#multi-round--session-binding)
+  - [Assignment State Machine](#assignment-state-machine)
+- [📦 Sample Onboarding Prompt](#-sample-onboarding-prompt)
+- [🔧 What setup.sh Does](#-what-setupsh-does)
+- [🔄 Upgrading](#-upgrading)
+- [🔌 API Summary](#-api-summary)
+- [❓ FAQ](#-faq)
+- [🎨 Design Philosophy](#-design-philosophy)
+- [📄 License](#-license)
+
+---
+
+## 🎯 Features
+
+| 🚀 | **Prompt-guided + hosted installer** | The onboarding prompt is a dozen lines; all static logic lives in the idempotent `setup.sh` — change logic without touching prompts, re-run to upgrade |
+| 👤 | **Capability Profile** | At registration the agent self-reports persona / model / skills; executor version is auto-detected, so the card tells you at a glance who's good at what |
+| 📋 | **Task Dispatch (text + attachments + follow-ups)** | @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; append rounds from the detail page with continuous context |
+| 🔐 | **Security Model** | One-time enrollment tokens + separate heartbeat tokens; passwords stored salted with PBKDF2-SHA256; only hashes in the database |
+| 🖥️ | **Pure WebUI Admin** | The admin machine needs nothing but a browser; task kanban (running / done / failed·canceled), auto-refresh every 15 seconds |
+| 🛠️ | **Zero-Dependency Deployment** | One static binary + embedded SQLite, systemd up in seconds; built-in rate limiting and security headers |
+
+---
+
+## 🧩 Architecture
+
+Between the server and agent machines there are **only agent-initiated outbound requests** (script download / heartbeat / task pull / result write-back) — no inbound connectivity required. The onboarding prompt travels out-of-band via the admin's clipboard; nothing needs to be preinstalled on the agent side.
 
 ```mermaid
 flowchart LR
@@ -38,9 +84,9 @@ flowchart LR
     P -.->|"② paste to the target agent"| G1
 ```
 
-Key point: between the server and agent machines there are **only agent-initiated outbound requests** (script download / heartbeat / task pull / result write-back) — no inbound connectivity required. The onboarding prompt travels out-of-band via the admin's clipboard; nothing needs to be preinstalled on the agent side.
+---
 
-## Onboarding flow
+## 📋 Onboarding Flow
 
 ```mermaid
 flowchart TD
@@ -53,7 +99,7 @@ flowchart TD
     F -- no --> H["401 → ask for a fresh token; other errors → retry once, then report the raw error"]
 ```
 
-## Registration & heartbeat sequence
+### Registration & Heartbeat Sequence
 
 ```mermaid
 sequenceDiagram
@@ -79,31 +125,114 @@ sequenceDiagram
     S-->>A: online status (last heartbeat ≤ 3 min ⇒ online)
 ```
 
-## Task dispatch (text + attachments)
+---
+
+## ⚡ Quick Start
+
+### Build
+
+Requires **Go ≥ 1.24** (developed on 1.26):
+
+```bash
+git clone https://github.com/HankGuo/agent-matrix.git
+cd agent-matrix
+go build -o agent-matrix .
+```
+
+Or:
+
+```bash
+go install github.com/HankGuo/agent-matrix@latest
+```
+
+### Run
+
+```bash
+export AGENT_MATRIX_BASE_URL='https://matrix.example.com'  # public URL, baked into prompts
+./agent-matrix
+```
+
+Open `http://localhost:26817` (or your domain).
+
+> ⚠️ **The first visit forces an initial-setup page**: create an admin username and password (stored salted with PBKDF2-SHA256), and optionally set the platform base URL right there. Once set up, all admin APIs and the dashboard require this account; the base URL can be changed anytime under "设置" (Settings).
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_MATRIX_ADDR` | `:26817` | HTTP listen address |
+| `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite database path |
+| `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | Public URL used in onboarding prompts. Can also be changed in WebUI Settings after deployment — **WebUI setting takes precedence** |
+| `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | Mark offline after this long without heartbeat |
+| `AGENT_MATRIX_STORAGE` | `local` | Attachment storage driver. `local` stores on disk; `s3` (presigned direct transfer) is a reserved extension point, not implemented yet |
+| `AGENT_MATRIX_ATTACH_DIR` | `<DB dir>/attachments` | Attachment directory (mount point) for the local driver; back it up together with the DB |
+| `AGENT_MATRIX_ADMIN_TOKEN` | empty (optional) | Emergency login token. If set, the login page can use it instead of username+password (e.g. forgotten password); without it, account login is the only path |
+
+### Production Deployment
+
+**systemd** with `Restart=always`:
+
+```ini
+[Unit]
+Description=Agent Matrix
+After=network.target
+
+[Service]
+Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
+Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
+ExecStart=/usr/local/bin/agent-matrix
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **HTTPS reverse proxy (Caddy)**: `matrix.example.com { reverse_proxy 127.0.0.1:26817 }`; firewall everything except 443
+- **Backup**: back up the single file at `AGENT_MATRIX_DB` (contains the admin account, agent list, and session keys)
+
+---
+
+## 📝 Usage
+
+1. Click "接入新 Agent" (top right) → optional name → generate prompt → copy
+2. **Paste the prompt verbatim to the target agent** (into its chat/CLI)
+3. The agent reports back the self-check output: registration result, executor command, scheduler type, registered profile
+4. Back in the WebUI, a green dot means it's online
+5. Switch to the "任务" (Tasks) tab → new task → write title & content, tick one or more agents → create
+6. The agent pulls the task within a minute and executes autonomously; click a task card to open the detail thread and see each agent's status and full result per round
+7. To dig further, type a new instruction into "继续任务" at the bottom of the detail page and send: same task, same agent session, continuous context — or tick extra agents to pull them in
+
+> ⚠️ **Note**: the target agent must be able to **run shell commands and create scheduled jobs**. A chat-only agent (e.g. some vendor-hosted IM bots) cannot onboard itself — that's a mechanical constraint, not a configuration issue.
+
+---
+
+## 📬 Task Dispatch
 
 The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents, optionally with up to 10 attachments (≤100MB each, each with its own caption). On each agent machine, `task-runner.sh` pulls tasks every minute, **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
 
 Runner reliability: a directory lock prevents re-entry (tasks run serially; later ticks skip while one is running), the narrow scheduler PATH is augmented explicitly, and the result written back is the last 30KB of output.
 
-### Attachment pipeline
+### Attachment Pipeline
 
 - **Delivery**: when an agent pulls a task, attachments land at `~/.agent-matrix/files/<task-id>/in/` as `<index>-<filename>`; a manifest (index + path + caption) is injected into the executor prompt, so "compare 附件1 and 附件2" in the task body maps unambiguously. Override the base dir with `AM_FILES_DIR`
 - **Collection**: the agent is told to write output files into `…/out/`; the runner uploads them after execution, and the detail page groups them per assignment
 - **Storage**: the default `local` driver streams bytes to `AGENT_MATRIX_ATTACH_DIR` (default: `attachments/` next to the DB), writes via temp-file + rename, and serves downloads with Range support (media scrubbing works); `AGENT_MATRIX_STORAGE` reserves an `s3` extension point (presigned direct transfer, not implemented yet)
 - **Security**: an agent can only download input files of tasks assigned to it; output uploads require a delivered assignment; the stored MIME is server-sniffed (client claims are not trusted); everything is served `attachment` by default, with inline preview only for an image/audio/video/PDF allowlist (plus a CSP sandbox); deleting a task or an agent cascades to its files
 
-### Follow-ups: rounds & session binding
+### Multi-Round & Session Binding
 
 After creation, a task accepts new rounds anytime from the box at the bottom of its detail page ("继续任务"): each round creates one fresh assignment per target agent (`seq` increments, each round snapshots its own instruction, results write back independently), and past rounds remain visible as a conversation thread. A follow-up defaults to the task's existing agents; you can also tick extra agents to pull them in.
 
-**The task ID is the session ID.** How the two official executors bind it:
+> **The task ID is the session ID.** How the two official executors bind it:
 
 - **OpenClaw**: wrapped by the setup.sh-generated `openclaw-round.sh`. Instead of guessing version numbers, it probes the `agent --help` surface at runtime — new versions (with `--session-key`) route every round via `openclaw agent --session-key "matrix-<task-id>" --message …`; older builds (e.g. 2026.4.x, no `--session-key`) automatically fall back to deriving a session with `--to "matrix-<task-id>" --json` on round one, archiving the parsed sessionId so later rounds continue via `--session-id`, with re-derivation on stale sessions — no manual intervention either way. Startup diagnostics such as `[plugins]` plugin-audit lines are filtered out before results are written back (the root fix is trusting plugins explicitly via `plugins.allow` in openclaw.json)
+
 - **Hermes Agent**: wrapped by the setup.sh-generated `hermes-round.sh` — round one runs `hermes chat -q --quiet` to start a session and parses the exact session_id from its output (`~/.agent-matrix/sessions/<task-id>`, also renamed to `matrix-<task-id>` so it is recognizable in `hermes sessions`); later rounds run with `--resume <sid>`. A failed resume (session pruned, etc.) automatically falls back to a fresh session, and when no session_id can be read it degrades to one session per round — neither breaks execution
 
 Collected output files move into the `out/sent/` subdirectory after upload: later rounds never re-upload them, yet the session can still read and reference them.
 
-### Assignment state machine
+### Assignment State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -123,11 +252,11 @@ Rules:
 
 - **Pull means delivered**: `GET /api/agent/tasks` flips pending → delivered inside a transaction, so a task is never pulled twice
 - **Write-back is single-shot**: only a delivered assignment accepts a result, exactly once; repeats get 409
-- **No automatic timeout requeue**: autonomous agents have unpredictable runtimes; auto-requeue would cause duplicate execution. A delivered assignment with no result after 10 minutes is flagged "疑似卡住" (possibly stuck) in the UI for a human to requeue manually
+- **No automatic timeout requeue**: autonomous agents have unpredictable runtimes; auto-requeue would cause duplicate execution. A delivered assignment with no result after 10 minutes is flagged "possibly stuck" in the UI for a human to requeue manually
 - Overall task status is aggregated live from its assignments: pending / running / done / partial / failed / canceled
 - Deleting an agent marks its unfinished assignments canceled; history is kept
 
-### Task sequence
+### Task Sequence
 
 ```mermaid
 sequenceDiagram
@@ -148,12 +277,14 @@ sequenceDiagram
     A->>S: GET /api/tasks (WebUI polls status & results every 15s)
 ```
 
-## Sample onboarding prompt
+---
+
+## 📦 Sample Onboarding Prompt
 
 This is what the WebUI generates (verbatim real output, Chinese by design — it is written for the *agent* to follow, not for a human to read). Copy and paste it to the target agent as-is:
 
 <details>
-<summary>Expand the full onboarding prompt</summary>
+<summary>📄 Expand the full onboarding prompt</summary>
 
 ```text
 请把你自己接入 Agent Matrix 监控中心。你是具备 shell 执行能力的 AI Agent。严格按以下步骤执行；全部幂等，可安全重复。
@@ -187,7 +318,13 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 
 </details>
 
-All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the prompt is just guidance. What `setup.sh` does:
+All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the prompt is just guidance.
+
+---
+
+## 🔧 What setup.sh Does
+
+`setup.sh` is idempotent — re-running it upgrades the agent to the latest runner:
 
 - **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when the instance's config already exists — naturally idempotent, re-running means upgrading)
 - **Collect the capability profile**: the executor is auto-detected in the order openclaw → hermes (with multiple CLIs installed, set `AM_EXECUTOR` explicitly — the reported profile always matches the actual execution channel), version from `<executor> --version`; merges the agent-reported `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`, and assembles the meta JSON with python3 — sent with registration; on upgrade re-runs, one meta-bearing heartbeat refreshes the profile (the per-minute regular heartbeat never carries it). All optional — skipping it doesn't block onboarding
@@ -197,89 +334,9 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 - **Install the per-minute scheduler**: macOS → two launchd plists (unload + load, idempotent); Linux → two merged cron lines or two systemd --user service+timer pairs; unit names and cron cleanup are scoped per instance suffix and never touch other instances; otherwise prints manual instructions (e.g. Windows)
 - **Self-check**: runs a real heartbeat, a real task pull, and the runner under an `env -i` narrow environment, then prints `AM_SETUP_DONE name=… sched=…`
 
-## Features
+---
 
-- **Prompt guidance + hosted installer**: the prompt is a dozen lines of guidance; all static logic lives in the server-hosted idempotent `setup.sh` — change the logic without touching prompts, and re-running it upgrades the agent to the latest runner
-- **Capability profile (who's good at what)**: at registration the agent self-reports persona / model / skills (guided by the prompt, with explicit boundaries — no system-prompt dumps, no secrets), executor and version are auto-detected; cards render it directly, and an upgrade re-run refreshes it
-- **Task dispatch (text + attachments + follow-up rounds)**: @ one or more agents; pull-to-lock means no duplicate delivery, write-back is single-shot; the detail page lets you append rounds with the task ID bound to the agent session, so context stays continuous; attachments ship with the task and outputs are collected and archived automatically; stuck assignments can be manually requeued
-- **Mandatory first-run setup**: with no account present, the WebUI only exposes the setup page; passwords are stored salted with PBKDF2-SHA256
-- **One-time enrollment tokens**: valid 24h, single-use; a separate heartbeat token is issued on registration; only hashes are stored
-- **One-click decommission**: the agent vanishes from the list immediately; its token hash moves to a tombstone table (kept 30 days), and its next heartbeat gets a 410 that triggers self-uninstall (scheduler removed, `~/.agent-matrix` deleted; deferred while the runner is busy; a powered-off machine still cleans up on its first heartbeat after boot)
-- **Pure WebUI**: the control machine needs nothing but a browser; a task kanban (running / done / failed·canceled columns, segmented single column on mobile) plus a round-based conversation-thread detail view; status dots and task progress auto-refresh every 15s
-- **Cross-platform heartbeat**: the installer auto-detects Linux (cron / systemd user timer) and macOS (launchd), and prints manual instructions elsewhere
-- **Reliable deployment**: one static binary + one SQLite file under systemd; graceful shutdown, rate limiting, and security headers built in
-
-## Quick start
-
-### Build
-
-Requires Go ≥ 1.24 (developed on 1.26):
-
-```bash
-git clone https://github.com/HankGuo/agent-matrix.git
-cd agent-matrix
-go build -o agent-matrix .
-```
-
-Or `go install github.com/HankGuo/agent-matrix@latest`.
-
-### Run
-
-```bash
-export AGENT_MATRIX_BASE_URL='https://matrix.example.com'       # public URL, baked into prompts
-./agent-matrix
-```
-
-Open `http://localhost:26817` (or your domain). **The first visit forces an initial-setup page**: create an admin username and password (stored salted with PBKDF2-SHA256), and optionally set the platform base URL right there. Once set up, all admin APIs and the dashboard require this account; the base URL can be changed anytime under "设置" (Settings).
-
-### Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `AGENT_MATRIX_ADDR` | `:26817` | HTTP listen address |
-| `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite database path |
-| `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | Public URL used in onboarding prompts. Can also be changed in WebUI Settings after deployment — **the WebUI setting takes precedence over the env var** |
-| `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | Mark offline after this long without heartbeat |
-| `AGENT_MATRIX_STORAGE` | `local` | Attachment storage driver. `local` stores on disk; `s3` (presigned direct transfer) is a reserved extension point, not implemented yet |
-| `AGENT_MATRIX_ATTACH_DIR` | `<DB dir>/attachments` | Attachment directory (mount point) for the local driver; back it up together with the DB |
-| `AGENT_MATRIX_ADMIN_TOKEN` | empty (optional) | Emergency login token. If set, the login page can use it instead of username+password (e.g. forgotten password); without it, account login is the only path |
-
-### Production tips
-
-- **systemd** with `Restart=always`:
-
-```ini
-[Unit]
-Description=Agent Matrix
-After=network.target
-
-[Service]
-Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
-Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
-ExecStart=/usr/local/bin/agent-matrix
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-- **HTTPS reverse proxy (Caddy)**: `matrix.example.com { reverse_proxy 127.0.0.1:26817 }`; firewall everything except 443
-- **Backup**: back up the single file at `AGENT_MATRIX_DB` (contains the admin account, agent list, and session key)
-
-## Usage
-
-1. Click "接入新 Agent" (top right) → optional name → generate prompt → copy
-2. **Paste the prompt verbatim to the target agent** (into its chat/CLI)
-3. The agent reports back the self-check output: registration result, executor command, scheduler type, registered profile
-4. Back in the WebUI, a green dot means it's online
-5. Switch to the "任务" (Tasks) tab → new task → write title & content, tick one or more agents → create
-6. The agent pulls the task within a minute and executes autonomously; click a task card to open the detail thread and see each agent's status and full result per round
-7. To dig further, type a new instruction into "继续任务" at the bottom of the detail page and send: same task, same agent session, continuous context — or tick extra agents to pull them in
-
-> Note: the target agent must be able to **run shell commands and create scheduled jobs**. A chat-only agent (e.g. some vendor-hosted IM bots) cannot onboard itself — that's a mechanical constraint, not a configuration issue.
-
-## Upgrading
+## 🔄 Upgrading
 
 **Server**: replace the binary and restart — data is untouched.
 
@@ -294,7 +351,9 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 1. Dispatch a self-upgrade task @ the target agents: "run `curl -fsS <base-url>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` and report the last line" — script writes are atomic (temp file + mv), so the runner replacing itself mid-run is safe
 2. If you have SSH: `curl -fsS <base-url>/setup.sh | sh`
 
-## API summary
+---
+
+## 🔌 API Summary
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -321,7 +380,9 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `POST` | `/api/assignments/{id}/requeue` | session cookie | Reset a suspected-stuck delivered assignment to pending |
 | `GET` | `/healthz` | none | Health check |
 
-## FAQ
+---
+
+## ❓ FAQ
 
 **Q: The server runs on my own machine — no static public IP, no domain. How do external agents enroll?**
 
@@ -332,13 +393,17 @@ The real constraint: `AM_URL` is baked into `~/.agent-matrix/config` at install 
 3. **DDNS + port mapping (when home broadband has a real but dynamic public IPv4)**: claim a free `xxx.duckdns.org`, run a cron that hits the DuckDNS update URL every minute, and map port `26817` on the router/ONT (a non-standard port conveniently sidesteps the residential 80/443 blocks). For HTTPS, use Caddy's DNS-01 challenge (DuckDNS works). Cost: depends on the ISP keeping you on a public IPv4; changing broadband or the ONT may require reconfiguration.
 4. **Cloudflare Tunnel (works behind CGNAT, but needs a domain)**: run `cloudflared` on the host — pure outbound to Cloudflare's edge with TLS included, zero demands on your network. A stable address requires a named tunnel plus your own domain (delegated to CF; a few dollars a year). TryCloudflare without a domain assigns a random hostname that changes on every restart, which breaks the pinned `AM_URL` — not usable.
 
-Whichever path you pick: once the console is reachable across networks, set a strong admin password. The agent-side one-time enrollment token + heartbeat token scheme stays unchanged.
+> 💡 Whichever path you pick: once the console is reachable across networks, set a strong admin password. The agent-side one-time enrollment token + heartbeat token scheme stays unchanged.
 
-## Scope
+---
 
-### Design philosophy: decisions stay with humans
+## 🎨 Design Philosophy
 
-![Design philosophy: humans decide, Matrix dispatches, agents execute](docs/philosophy.svg)
+<br>
+
+<img src="docs/philosophy.svg" alt="Design philosophy: humans decide, Agent Matrix dispatches, agents execute" width="100%">
+
+<br>
 
 AI makes execution cheap; judgment becomes the scarce part: knowing what to do, finding the right capability, and judging the result. Matrix is deliberately an all-in-one **management board**, not an orchestration engine:
 
@@ -350,6 +415,8 @@ Agent Matrix covers **registry + presence + task delivery (text and attachments)
 
 Versus IM-group management (WeCom / Lark / Telegram gateways): IM is the **conversation surface** between you and your agents; Matrix is the **dispatch & archive surface** for tasks — the assignment state machine, result receipts, the attachment pipeline, and capability profiles are things an IM chat history can't give you. They coexist: casual asks go to the group, formal work goes through Matrix.
 
-## License
+---
+
+## 📄 License
 
 [Apache License 2.0](LICENSE): free to use, modify, and redistribute, including commercially — provided you keep the copyright and [NOTICE](NOTICE) attribution, state your changes, and honor the patent terms. To use it commercially **without attribution**, contact the author for a commercial license (GitHub: [@HankGuo](https://github.com/HankGuo)).
