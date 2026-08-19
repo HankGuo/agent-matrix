@@ -400,6 +400,8 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 
 4. **Cloudflare Tunnel（CGNAT 也能用，但要域名）**：本机跑 `cloudflared` 纯出站连到 Cloudflare 边缘，自带 TLS，对网络环境零要求。但要固定地址就得用 named tunnel + 自有域名（NS 托管到 CF，域名本身几块钱一年）；不买域名用 TryCloudflare 的话每次重启分配的随机域名会变，`AM_URL` 就失效了，不可用。
 
+5. **全在本机（天然方案，最省事但范围最小）**：如果所有 Agent 都跑在同一台机器上，`AM_URL` 直接写 `http://127.0.0.1:26817` 就行，没有公网 IP、没有域名、没有 Tailscale 都不是问题——项目天然兼容本地方案，`setup.sh` 的定时任务和文件路径都正常工作。虽然比起 OpenClaw / Hermes 自带的本地管理能力略显简陋，但作为轻量看板 + 任务派发器完全可用。局限也很明显：只适合单机多实例场景，一旦有 Agent 需要跨机器接入就得走上面四条路之一。
+
 > 💡 不管选哪条，控制台一旦跨网可达，就把管理员密码设强；Agent 侧的一次性注册令牌 + 心跳令牌体系本身不变。
 
 ---
