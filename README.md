@@ -429,3 +429,11 @@ Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**
 ## 📄 License
 
 [Apache License 2.0](LICENSE)：任何人可**免费**使用、修改、再发布，包括商业用途；条件是保留版权与 [NOTICE](NOTICE) 署名、声明你所做的修改，并遵守其中的专利条款。如需在**不保留署名**的条件下商业使用，请联系作者获取商业授权（GitHub: [@HankGuo](https://github.com/HankGuo)）。
+
+---
+
+## 📢 关注公众号
+
+欢迎关注微信公众号 **「算力白肉」**，获取更多技术分享与项目动态：
+
+<img src="docs/wechat-qr.jpg" alt="微信公众号：算力白肉" width="200">

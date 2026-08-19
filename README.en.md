@@ -425,3 +425,11 @@ Versus IM-group management (WeCom / Lark / Telegram gateways): IM is the **conve
 ## 📄 License
 
 [Apache License 2.0](LICENSE): free to use, modify, and redistribute, including commercially — provided you keep the copyright and [NOTICE](NOTICE) attribution, state your changes, and honor the patent terms. To use it commercially **without attribution**, contact the author for a commercial license (GitHub: [@HankGuo](https://github.com/HankGuo)).
+
+---
+
+## 📢 Follow on WeChat
+
+Welcome to follow the WeChat public account **「算力白肉」** for more tech articles and project updates:
+
+<img src="docs/wechat-qr.jpg" alt="WeChat public account: 算力白肉" width="200">
