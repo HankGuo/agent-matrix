@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="376" viewBox="0 0 880 376" role="img" aria-label="Design philosophy: humans decide, Agent Matrix dispatches, agents execute autonomously">
+  <style>
+    .t { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1f2937; }
+    .s { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; fill: #5b6470; }
+    .m { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #6b7280; }
+    .card { fill: #f8fafc; stroke: #dbe1e8; stroke-width: 1.5; }
+    .hl { fill: rgba(13,148,136,0.07); stroke: #0d9488; stroke-width: 1.5; }
+    .teal { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; fill: #0f766e; }
+    .ln { stroke: #9aa3ad; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+    .lnUp { stroke: #0d9488; stroke-width: 1.6; fill: none; marker-end: url(#arrT); }
+    .arrF { fill: #9aa3ad; }
+    .arrTF { fill: #0d9488; }
+    .cap { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; fill: #6b7280; }
+    @media (prefers-color-scheme: dark) {
+      .t { fill: #e6edf3; }
+      .s { fill: #9aa4b0; }
+      .m { fill: #8b949e; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .hl { fill: rgba(45,212,191,0.08); stroke: #2dd4bf; }
+      .teal { fill: #2dd4bf; }
+      .ln { stroke: #6b7280; }
+      .arrF { fill: #6b7280; }
+      .lnUp { stroke: #2dd4bf; }
+      .arrTF { fill: #2dd4bf; }
+      .cap { fill: #8b949e; }
+    }
+  </style>
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" class="arrF"/>
+    </marker>
+    <marker id="arrT" markerWidth="9" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" class="arrTF"/>
+    </marker>
+  </defs>
+
+  <!-- 顶层：人类决策 -->
+  <rect x="40" y="24" width="800" height="64" rx="8" class="card"/>
+  <text x="68" y="57" class="t" font-size="20" font-weight="700" dominant-baseline="central">HUMAN</text>
+  <text x="214" y="57" class="s" font-size="13.5" dominant-baseline="central">decide what to do · choose who does it · judge the result</text>
+
+  <!-- 中层：极简控制面（刻意更矮） -->
+  <rect x="40" y="164" width="800" height="46" rx="8" class="hl"/>
+  <text x="68" y="188" class="teal" font-size="15" font-weight="700" dominant-baseline="central">AGENT MATRIX</text>
+  <text x="254" y="188" class="m" font-size="12.5" dominant-baseline="central">registry · presence · dispatch · archive</text>
+  <text x="812" y="188" class="m" font-size="11" text-anchor="end" dominant-baseline="central">minimal control plane</text>
+
+  <!-- 底层：Agent 自治执行 -->
+  <rect x="40" y="288" width="800" height="64" rx="8" class="card"/>
+  <text x="68" y="321" class="t" font-size="20" font-weight="700" dominant-baseline="central">AGENTS</text>
+  <text x="214" y="321" class="s" font-size="13.5" dominant-baseline="central">openclaw · hermes · any CLI · plan &amp; execute autonomously</text>
+
+  <!-- 左通道：下发 -->
+  <line x1="150" y1="96" x2="150" y2="156" class="ln"/>
+  <line x1="150" y1="218" x2="150" y2="280" class="ln"/>
+  <text x="166" y="128" class="cap">instructions + files</text>
+
+  <!-- 右通道：回传 -->
+  <line x1="730" y1="280" x2="730" y2="218" class="lnUp"/>
+  <line x1="730" y1="156" x2="730" y2="96" class="lnUp"/>
+  <text x="746" y="252" class="cap">results + outputs</text>
+</svg>

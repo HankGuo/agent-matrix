@@ -6,6 +6,8 @@
 
 单二进制 + 嵌入式 SQLite + 内嵌 WebUI，**零外部运行时依赖**。
 
+![Agent Matrix 拓扑示意：浏览器管理端、单二进制服务端、Agent 纯出站接入](docs/topology.svg)
+
 ## 整体架构
 
 ```mermaid
@@ -318,7 +320,30 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | `POST` | `/api/assignments/{id}/requeue` | 会话 Cookie | 把疑似卡住的 delivered 指派重置回 pending |
 | `GET` | `/healthz` | 无 | 健康检查 |
 
+## 常见问题（Q&A）
+
+**Q：服务端部署在本机，没有固定公网 IP、也没有域名，外部 Agent 怎么接进来？**
+
+先说清症结：Agent 装机时 `AM_URL` 会固化进 `~/.agent-matrix/config`，心跳和拉任务都走它。所以你要解决的不是"固定 IP"，而是给 Agent 一个**长期稳定、处处可达的入口地址**。四条路，按省事程度排：
+
+1. **买台云服务器（最省事）**：最便宜的 VPS 自带固定公网 IP，直接 `AGENT_MATRIX_BASE_URL=http://<IP>:26817` 就能用；再花一分钟用 Caddy 签个证书绑个域名就更体面。数据在别人机房这点自己权衡。
+2. **Tailscale 组网（Agent 全是自己机器时最优雅）**：本机和每台 Agent 都加入同一个 tailnet，每台机器自动获得固定虚拟 IP 和固定主机名（`yourhost.xxx.ts.net`）。动态 IP、CGNAT、无域名全都无所谓——打不通时自动走中继。`AM_URL` 固化成 `http://yourhost.xxx.ts.net:26817` 永久稳定，且全程 WireGuard 加密、控制台零公网暴露。个人版 100 台设备免费。代价：每台 Agent 机器要多装一个 tailscale；厂商托管、锁死装不了软件的 Agent 机器走不了这条。
+3. **DDNS + 端口映射（家里确有真公网 IPv4、只是动态时）**：DuckDNS 免费申请 `xxx.duckdns.org`，本机 cron 每分钟一个 HTTP GET 刷新解析；路由器/光猫把 `26817` 映射到本机（非标端口正好避开家宽封 80/443 的惯例）。HTTPS 用 Caddy 的 DNS-01 挑战签证书（DuckDNS 支持）。代价：依赖运营商持续给公网 IPv4，换宽带/换光猫可能要重配。
+4. **Cloudflare Tunnel（CGNAT 也能用，但要域名）**：本机跑 `cloudflared` 纯出站连到 Cloudflare 边缘，自带 TLS，对网络环境零要求。但要固定地址就得用 named tunnel + 自有域名（NS 托管到 CF，域名本身几块钱一年）；不买域名用 TryCloudflare 的话每次重启分配的随机域名会变，`AM_URL` 就失效了，不可用。
+
+不管选哪条，控制台一旦跨网可达，就把管理员密码设强；Agent 侧的一次性注册令牌 + 心跳令牌体系本身不变。
+
 ## 定位与边界
+
+### 设计哲学：决策留在人类手里
+
+![设计哲学：人类决策 - Matrix 派单 - Agent 自治](docs/philosophy.svg)
+
+AI 让执行越来越廉价，稀缺的是判断：知道该做什么、找到合适的能力、验收结果的好坏。Matrix 的克制正源于这个判断——它是一块 all-in-one 的**管理看板**，而不是编排引擎：
+
+- **控制面刻意极简**：没有 DAG、没有条件分支、没有自动重试。注册、心跳、派单、回收、归档，仅此而已。
+- **编排下沉到 Agent 自治**：任务交到 Agent 手里后，怎么拆解、怎么执行、调用哪些技能，由 Agent 自己规划。Matrix 不反对编排本身，反对的是把 Agent 降格为无脑执行器的中央编排。
+- **三件事永远留给人类**：判断该做什么、选择谁来做、验收做得对不对。这不是功能缺失，是边界宣言。
 
 Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**。任务模型刻意简单：一轮派发、一次执行、一次回写，需要接着做就追加一轮（同任务同会话）——没有 DAG 编排、没有自动重试。需要复杂工作流编排时仍可与专业平台共存：Matrix 负责「谁活着、把这句话和这些文件送到、把结果收回来」，编排平台负责「多步流程」。
 
@@ -326,4 +351,4 @@ Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)：任何人可**免费**使用、修改、再发布，包括商业用途；条件是保留版权与 [NOTICE](NOTICE) 署名、声明你所做的修改，并遵守其中的专利条款。如需在**不保留署名**的条件下商业使用，请联系作者获取商业授权（GitHub: [@HankGuo](https://github.com/HankGuo)）。

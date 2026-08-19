@@ -6,6 +6,8 @@ A lightweight **agent registry, online-status monitor, and plain-text task dispa
 
 Single static binary + embedded SQLite + embedded WebUI — **zero runtime dependencies**.
 
+![Agent Matrix topology: browser admin, single-binary server, outbound-only agents](docs/topology.svg)
+
 ## Architecture
 
 ```mermaid
@@ -318,7 +320,30 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | `POST` | `/api/assignments/{id}/requeue` | session cookie | Reset a suspected-stuck delivered assignment to pending |
 | `GET` | `/healthz` | none | Health check |
 
+## FAQ
+
+**Q: The server runs on my own machine — no static public IP, no domain. How do external agents enroll?**
+
+The real constraint: `AM_URL` is baked into `~/.agent-matrix/config` at install time, and every heartbeat / task poll goes through it. So you don't need a static IP — you need a **stable, reachable address** for agents. Four options, ordered by effort:
+
+1. **Buy a cheap VPS (simplest)**: even the cheapest tier comes with a static public IP — `AGENT_MATRIX_BASE_URL=http://<IP>:26817` just works; add Caddy for a cert and a domain if you want it tidy. Weigh the "data lives in someone else's datacenter" trade-off yourself.
+2. **Tailscale (most elegant when every agent machine is yours)**: put the host and every agent into one tailnet; each machine gets a stable virtual IP and a Magic DNS name (`yourhost.xxx.ts.net`). Dynamic IP, CGNAT, no domain — none of it matters, and traffic falls back to relays when direct punching fails. Pin `AM_URL` to `http://yourhost.xxx.ts.net:26817` forever, with WireGuard encryption and zero public exposure of the console. Free tier covers 100 devices. Cost: one extra `tailscale up` per agent machine; vendor-locked agent hosts that can't install software can't use this path.
+3. **DDNS + port mapping (when home broadband has a real but dynamic public IPv4)**: claim a free `xxx.duckdns.org`, run a cron that hits the DuckDNS update URL every minute, and map port `26817` on the router/ONT (a non-standard port conveniently sidesteps the residential 80/443 blocks). For HTTPS, use Caddy's DNS-01 challenge (DuckDNS works). Cost: depends on the ISP keeping you on a public IPv4; changing broadband or the ONT may require reconfiguration.
+4. **Cloudflare Tunnel (works behind CGNAT, but needs a domain)**: run `cloudflared` on the host — pure outbound to Cloudflare's edge with TLS included, zero demands on your network. A stable address requires a named tunnel plus your own domain (delegated to CF; a few dollars a year). TryCloudflare without a domain assigns a random hostname that changes on every restart, which breaks the pinned `AM_URL` — not usable.
+
+Whichever path you pick: once the console is reachable across networks, set a strong admin password. The agent-side one-time enrollment token + heartbeat token scheme stays unchanged.
+
 ## Scope
+
+### Design philosophy: decisions stay with humans
+
+![Design philosophy: humans decide, Matrix dispatches, agents execute](docs/philosophy.svg)
+
+AI makes execution cheap; judgment becomes the scarce part: knowing what to do, finding the right capability, and judging the result. Matrix is deliberately an all-in-one **management board**, not an orchestration engine:
+
+- **A deliberately minimal control plane**: no DAGs, no conditional branches, no automatic retries. Registry, heartbeat, dispatch, collection, archive — nothing more.
+- **Orchestration sinks into agent autonomy**: once a task lands on an agent, how to break it down, execute it, and which skills to invoke is the agent's own planning. Matrix is not anti-orchestration — it rejects centralized orchestration that demotes agents into mindless executors.
+- **Three things always stay with humans**: deciding what to do, choosing who does it, and judging whether it was done well. Not a missing feature — a boundary statement.
 
 Agent Matrix covers **registry + presence + task delivery (text and attachments)**. The task model is deliberately simple: one round, one execution, one write-back — and when you need more, append another round inside the same session. No DAG orchestration, no automatic retries. For complex workflows, pair it with a real orchestrator: Matrix answers "who's alive, deliver this sentence and these files, collect the result"; the orchestrator answers "multi-step pipelines".
 
@@ -326,4 +351,4 @@ Versus IM-group management (WeCom / Lark / Telegram gateways): IM is the **conve
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE): free to use, modify, and redistribute, including commercially — provided you keep the copyright and [NOTICE](NOTICE) attribution, state your changes, and honor the patent terms. To use it commercially **without attribution**, contact the author for a commercial license (GitHub: [@HankGuo](https://github.com/HankGuo)).
