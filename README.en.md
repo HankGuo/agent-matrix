@@ -98,7 +98,7 @@ After creation, a task accepts new rounds anytime from the box at the bottom of 
 
 **The task ID is the session ID.** How the two official executors bind it:
 
-- **OpenClaw**: the long-running Gateway natively supports session keys; every round runs `openclaw agent --session-key "matrix-<task-id>" --message …`, so the same task always continues the same session
+- **OpenClaw**: wrapped by the setup.sh-generated `openclaw-round.sh`. Instead of guessing version numbers, it probes the `agent --help` surface at runtime — new versions (with `--session-key`) route every round via `openclaw agent --session-key "matrix-<task-id>" --message …`; older builds (e.g. 2026.4.x, no `--session-key`) automatically fall back to deriving a session with `--to "matrix-<task-id>" --json` on round one, archiving the parsed sessionId so later rounds continue via `--session-id`, with re-derivation on stale sessions — no manual intervention either way. Startup diagnostics such as `[plugins]` plugin-audit lines are filtered out before results are written back (the root fix is trusting plugins explicitly via `plugins.allow` in openclaw.json)
 - **Hermes Agent**: wrapped by the setup.sh-generated `hermes-round.sh` — round one runs `hermes chat -q --quiet` to start a session and parses the exact session_id from its output (`~/.agent-matrix/sessions/<task-id>`, also renamed to `matrix-<task-id>` so it is recognizable in `hermes sessions`); later rounds run with `--resume <sid>`. A failed resume (session pruned, etc.) automatically falls back to a fresh session, and when no session_id can be read it degrades to one session per round — neither breaks execution
 
 Collected output files move into the `out/sent/` subdirectory after upload: later rounds never re-upload them, yet the session can still read and reference them.
@@ -180,7 +180,8 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
 
 ## 备注
-- 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
+- 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测。**这台机器同时装了多个执行器 CLI 时**，在命令前加 AM_EXECUTOR 显式指定你要用哪个（如 AM_EXECUTOR=hermes），脚本会让上报的画像和实际执行通道保持一致。要完全自定义就设 AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑实例目录 config 里的 AM_RUN_TASK 即可。
+- **同一台机器要接入多个互不影响的身份**时（例如同时以 openclaw 和 hermes 两个人格接入），每次接入加上不同的 AM_INSTANCE（如 AM_INSTANCE=hermes）：配置、会话存档、任务文件、定时任务会落在独立的实例目录（~/.agent-matrix-<实例名>），彻底隔离。不加则共用默认目录 ~/.agent-matrix/。
 - 调度环境未被自动识别时（如 Windows），脚本会打印手动安装说明，照做即可。
 ```
 
@@ -188,12 +189,12 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 
 All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the prompt is just guidance. What `setup.sh` does:
 
-- **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when `~/.agent-matrix/config` already exists — naturally idempotent, re-running means upgrading)
-- **Collect the capability profile**: auto-detects the executor and its version (`openclaw --version` / `hermes --version`), merges the agent-reported `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`, and assembles the meta JSON with python3 — sent with registration; on upgrade re-runs, one meta-bearing heartbeat refreshes the profile (the per-minute regular heartbeat never carries it). All optional — skipping it doesn't block onboarding
-- **Persist**: `~/.agent-matrix/config` (mode 600) with `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
-- **Detect the executor**: OpenClaw and Hermes Agent are the officially supported executors, probed in the order openclaw → hermes; OpenClaw uses `--session-key "matrix-$2"` for one session per task, Hermes goes through the generated `hermes-round.sh` wrapper (round one starts a session and archives its session_id, later rounds `--resume` it); or set `AM_RUN_TASK='…'` explicitly (`$1`=task content, `$2`=task ID tsk_…)
-- **Write two scripts**: `heartbeat.sh` and `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail)
-- **Install the per-minute scheduler**: macOS → two launchd plists (unload + load, idempotent); Linux → two merged cron lines or two systemd --user service+timer pairs; otherwise prints manual instructions (e.g. Windows)
+- **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when the instance's config already exists — naturally idempotent, re-running means upgrading)
+- **Collect the capability profile**: the executor is auto-detected in the order openclaw → hermes (with multiple CLIs installed, set `AM_EXECUTOR` explicitly — the reported profile always matches the actual execution channel), version from `<executor> --version`; merges the agent-reported `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`, and assembles the meta JSON with python3 — sent with registration; on upgrade re-runs, one meta-bearing heartbeat refreshes the profile (the per-minute regular heartbeat never carries it). All optional — skipping it doesn't block onboarding
+- **Persist**: the instance directory's `config` (mode 600) with `AM_URL` / `AM_HB_TOKEN` / `AM_INSTANCE` / `AM_RUN_TASK`. The default instance directory is `~/.agent-matrix`; with `AM_INSTANCE=<name>` it becomes `~/.agent-matrix-<name>` — multiple identities can coexist on one machine with fully isolated configs, session archives, task files, and schedulers
+- **Executor command**: OpenClaw goes through the generated `openclaw-round.sh` wrapper (probes the CLI surface and adapts: `--session-key "matrix-$2"` one-session-per-task on new versions, automatic fallback to `--to` derivation + `--session-id` resume on older builds without it), Hermes goes through the generated `hermes-round.sh` wrapper (round one starts a session and archives its session_id, later rounds `--resume` it); or set `AM_RUN_TASK='…'` to fully customize (`$1`=task content, `$2`=task ID tsk_…)
+- **Write two scripts**: `heartbeat.sh` and `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail); the scripts self-locate their instance directory, so any directory name works
+- **Install the per-minute scheduler**: macOS → two launchd plists (unload + load, idempotent); Linux → two merged cron lines or two systemd --user service+timer pairs; unit names and cron cleanup are scoped per instance suffix and never touch other instances; otherwise prints manual instructions (e.g. Windows)
 - **Self-check**: runs a real heartbeat, a real task pull, and the runner under an `env -i` narrow environment, then prints `AM_SETUP_DONE name=… sched=…`
 
 ## Features

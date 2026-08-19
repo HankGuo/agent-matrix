@@ -3,10 +3,12 @@
 #
 # 用法：
 #   新接入：AM_URL="https://matrix.example.com" AM_TOKEN="ame_…" AM_NAME="my-agent" sh setup.sh
-#   升级/换装：sh setup.sh            （已有 ~/.agent-matrix/config 时跳过注册，直接更新脚本与定时任务）
-#   指定执行器：AM_RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1"' sh setup.sh
+#   升级/换装：sh setup.sh            （已有 <实例目录>/config 时跳过注册，直接更新脚本与定时任务）
+#   指定执行器：AM_EXECUTOR=hermes sh setup.sh   （多 CLI 共存时显式选定，画像与实际执行通道始终一致）
+#   单机多身份：AM_INSTANCE=writer AM_NAME="…" sh setup.sh   （实例目录 ~/.agent-matrix-writer，完全隔离）
+#   自定义命令：AM_RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1"' sh setup.sh
 #
-# 自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 →
+# 自动完成：注册换发凭证 → 落盘 <实例目录> → 安装心跳与任务执行器 →
 #           安装每分钟定时任务（cron / launchd / systemd user timer）→ 自检。
 set -u
 
@@ -15,12 +17,20 @@ export PATH
 
 AM_URL="${AM_URL:-{{BASE_URL}}}"
 AM_TOKEN="${AM_TOKEN:-}"
-AM_NAME="${AM_NAME:-agent-$(hostname 2>/dev/null || echo unknown)}"
-DIR="$HOME/.agent-matrix"
-CFG="$DIR/config"
+AM_INSTANCE="${AM_INSTANCE:-}"
+AM_NAME="${AM_NAME:-agent-$(hostname 2>/dev/null || echo unknown)${AM_INSTANCE:+-$AM_INSTANCE}}"
 
 say() { printf '%s\n' "$*"; }
 die() { say "FAIL: $*"; exit 1; }
+
+# 实例隔离：默认实例沿用 ~/.agent-matrix（向后兼容）；指定 AM_INSTANCE 后用独立目录，
+# config / sessions / files / runner.lock / 定时任务全部按实例隔离，同机多身份互不污染。
+case "$AM_INSTANCE" in
+  "") DIR="$HOME/.agent-matrix" ;;
+  *[!a-zA-Z0-9-]*) die "AM_INSTANCE 只允许字母、数字、连字符" ;;
+  *) DIR="$HOME/.agent-matrix-$AM_INSTANCE" ;;
+esac
+CFG="$DIR/config"
 
 # 直接运行仓库里的原始脚本（未经过服务器替换占位符）时给出明确提示
 case "$AM_URL" in *"{{"*) die "AM_URL 未设置：请通过 GET /setup.sh 下载本脚本，或用 AM_URL=... 显式指定平台地址";; esac
@@ -29,11 +39,16 @@ command -v curl >/dev/null 2>&1 || die "需要 curl"
 mkdir -p "$DIR" && chmod 700 "$DIR"
 
 # ---- 1) 能力画像采集（随注册上报、随升级刷新，全部可选） ----
-# 执行器与版本自动探测；人设/模型/技能由 Agent 通过 AM_PERSONA / AM_MODEL / AM_SKILLS 提供。
-# JSON 交给 python3 组装，避免 shell 拼串的引号注入；无 python3 则跳过画像（不影响接入）。
-EXECUTOR=""
-if   command -v openclaw >/dev/null 2>&1; then EXECUTOR=openclaw
-elif command -v hermes   >/dev/null 2>&1; then EXECUTOR=hermes
+# 执行器与版本自动探测（多 CLI 共存时用 AM_EXECUTOR 显式指定）；人设/模型/技能由 Agent 通过
+# AM_PERSONA / AM_MODEL / AM_SKILLS 提供。JSON 交给 python3 组装，避免 shell 拼串的引号注入；
+# 无 python3 则跳过画像（不影响接入）。
+EXECUTOR="${AM_EXECUTOR:-}"
+if [ -z "$EXECUTOR" ]; then
+  if   command -v openclaw >/dev/null 2>&1; then EXECUTOR=openclaw
+  elif command -v hermes   >/dev/null 2>&1; then EXECUTOR=hermes
+  fi
+elif ! command -v "$EXECUTOR" >/dev/null 2>&1; then
+  say "== 警告: AM_EXECUTOR=$EXECUTOR 但 PATH 里找不到该命令，请确认拼写"
 fi
 EXECUTOR_VER=""
 [ -n "$EXECUTOR" ] && EXECUTOR_VER=$("$EXECUTOR" --version 2>/dev/null | head -1 | sed 's/^[^0-9]*//; s/[^0-9.].*$//')
@@ -75,53 +90,57 @@ else
 fi
 
 # ---- 3) 选定任务执行命令（写入 config，之后改命令只需编辑 config） ----
-# 官方支持 OpenClaw 与 Hermes Agent 两家执行器，按顺序探测；两者都按任务 ID 绑定会话，
-# 同一任务的追加轮自动携带上文：
+# 官方支持 OpenClaw 与 Hermes Agent 两家执行器；RUN_TASK 跟随第 1 步选定的 EXECUTOR，
+# 上报画像与实际执行通道永远一致（可用 AM_RUN_TASK 完全自定义，此时画像以 AM_EXECUTOR 为准）：
 #   openclaw: 走常驻 Gateway 的一个 agent turn，--session-key 即任务 ID
 #   hermes:   经 hermes-round.sh 包装——首轮 chat -q 建会话并记录 session_id，后续轮 --resume 续上
 RUN_TASK="${AM_RUN_TASK:-}"
 if [ -z "$RUN_TASK" ]; then
-  if   command -v openclaw >/dev/null 2>&1; then RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1" --timeout 1800'
-  elif command -v hermes   >/dev/null 2>&1; then RUN_TASK="sh $DIR/hermes-round.sh \"\$1\" \"\$2\""
-  else RUN_TASK='echo "未探测到 openclaw / hermes CLI：请先安装其一，或编辑 config 把 AM_RUN_TASK 改成你的一次性非交互执行命令（$1=任务内容 $2=任务ID）" >&2; exit 99'
-  fi
+  case "$EXECUTOR" in
+    openclaw) RUN_TASK="sh $DIR/openclaw-round.sh \"\$1\" \"\$2\"";;
+    hermes)   RUN_TASK="sh $DIR/hermes-round.sh \"\$1\" \"\$2\"";;
+    *)        RUN_TASK='echo "未探测到 openclaw / hermes CLI：请先安装其一、用 AM_EXECUTOR 指定，或编辑 config 把 AM_RUN_TASK 改成你的一次性非交互执行命令（$1=任务内容 $2=任务ID）" >&2; exit 99';;
+  esac
 fi
 case "$RUN_TASK" in *"'"*) die "AM_RUN_TASK 不能包含单引号";; esac
-printf 'AM_URL=%s\nAM_HB_TOKEN=%s\nAM_RUN_TASK=%s\n' "$AM_URL" "$AM_HB_TOKEN" "'$RUN_TASK'" > "$CFG"
+printf 'AM_URL=%s\nAM_HB_TOKEN=%s\nAM_INSTANCE=%s\nAM_RUN_TASK=%s\n' "$AM_URL" "$AM_HB_TOKEN" "$AM_INSTANCE" "'$RUN_TASK'" > "$CFG"
 chmod 600 "$CFG"
 say "== 执行器: $RUN_TASK"
 
 # ---- 4) 心跳脚本 ----
 # 临时文件 + mv 原子替换：本脚本可能被「自升级任务」触发，此时 heartbeat.sh / task-runner.sh
 # 可能正在运行；直接 cat > 截断改写会让运行中的 sh 实例读到错乱内容，mv 换 inode 则安全。
-# 心跳收到 410（已下线）时自卸载：runner 忙则本轮推迟；卸定时任务、删整个 ~/.agent-matrix。
+# 心跳收到 410（已下线）时自卸载：runner 忙则本轮推迟；卸定时任务、删本实例目录。
+# 脚本一律自定位所在目录，实例目录叫什么都能正确工作（AM_INSTANCE 从 config 读出）。
 cat > "$DIR/.heartbeat.sh.tmp" <<'EOF'
 #!/bin/sh
-. "$HOME/.agent-matrix/config"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$DIR/config"
+SFX="${AM_INSTANCE:+-$AM_INSTANCE}"
 code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$AM_URL/api/heartbeat" \
   -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
 [ "$code" = "410" ] || exit 0
 
 # 已被平台下线：runner 正在执行任务则本轮跳过，下一分钟心跳仍会 410，届时再卸
-mkdir "$HOME/.agent-matrix/runner.lock" 2>/dev/null || exit 0
+mkdir "$DIR/runner.lock" 2>/dev/null || exit 0
 
 if [ "$(uname -s)" = "Darwin" ]; then
   for unit in heartbeat task-runner; do
-    plist="$HOME/Library/LaunchAgents/com.agent-matrix.$unit.plist"
+    plist="$HOME/Library/LaunchAgents/com.agent-matrix$SFX.$unit.plist"
     launchctl unload "$plist" 2>/dev/null
     rm -f "$plist"
   done
 elif command -v crontab >/dev/null 2>&1; then
-  crontab -l 2>/dev/null | grep -v 'agent-matrix/' | crontab - 2>/dev/null
+  crontab -l 2>/dev/null | grep -v "$DIR/" | crontab - 2>/dev/null
 elif command -v systemctl >/dev/null 2>&1; then
   for unit in heartbeat task-runner; do
-    systemctl --user disable --now "agent-matrix-$unit.timer" 2>/dev/null
-    rm -f "$HOME/.config/systemd/user/agent-matrix-$unit.service" \
-          "$HOME/.config/systemd/user/agent-matrix-$unit.timer"
+    systemctl --user disable --now "agent-matrix$SFX-$unit.timer" 2>/dev/null
+    rm -f "$HOME/.config/systemd/user/agent-matrix$SFX-$unit.service" \
+          "$HOME/.config/systemd/user/agent-matrix$SFX-$unit.timer"
   done
   systemctl --user daemon-reload 2>/dev/null
 fi
-cd / && rm -rf "$HOME/.agent-matrix"
+cd / && rm -rf "$DIR"
 EOF
 mv -f "$DIR/.heartbeat.sh.tmp" "$DIR/heartbeat.sh"
 
@@ -131,7 +150,8 @@ mv -f "$DIR/.heartbeat.sh.tmp" "$DIR/heartbeat.sh"
 cat > "$DIR/.task-runner.sh.tmp" <<'EOF'
 #!/bin/sh
 # task-runner.sh：拉取平台任务并执行，机械回写结果（由 Agent Matrix setup.sh 生成）
-lockdir="$HOME/.agent-matrix/runner.lock"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+lockdir="$DIR/runner.lock"
 mkdir "$lockdir" 2>/dev/null || exit 0   # 一个任务没跑完，后续轮次直接跳过（串行执行）
 trap 'rmdir "$lockdir"' EXIT
 
@@ -139,9 +159,9 @@ trap 'rmdir "$lockdir"' EXIT
 PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 export PATH
 
-. "$HOME/.agent-matrix/config"
+. "$DIR/config"
 export AM_URL AM_HB_TOKEN AM_RUN_TASK
-AM_FILES_DIR="${AM_FILES_DIR:-$HOME/.agent-matrix/files}"
+AM_FILES_DIR="${AM_FILES_DIR:-$DIR/files}"
 export AM_FILES_DIR
 
 python3 - <<'PYEOF'
@@ -247,7 +267,8 @@ mv -f "$DIR/.task-runner.sh.tmp" "$DIR/task-runner.sh"
 cat > "$DIR/.hermes-round.sh.tmp" <<'EOF'
 #!/bin/sh
 # hermes-round.sh "<指令>" "<任务ID>"（由 Agent Matrix setup.sh 生成）
-MAP="$HOME/.agent-matrix/sessions"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+MAP="$DIR/sessions"
 mkdir -p "$MAP"
 sidf="$MAP/$2"
 outf="$MAP/.$2.out"
@@ -277,20 +298,99 @@ exit "$rc"
 EOF
 mv -f "$DIR/.hermes-round.sh.tmp" "$DIR/hermes-round.sh"
 
-chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh"
+# OpenClaw 会话包装：同一任务 ID 绑定同一会话。版本适配不猜版本号，直接探测
+# agent --help 的参数面：
+#   有 --session-key（新版）：直接按 key 路由，matrix-<任务ID> 即会话
+#   无则降级（如 2026.4.x）：首轮 --to 派生会话、--json 输出里解析 sessionId 存档，
+#   后续轮 --session-id 续上；resume 失败删存档降级为首轮重跑，都不影响任务执行本身。
+cat > "$DIR/.openclaw-round.sh.tmp" <<'EOF'
+#!/bin/sh
+# openclaw-round.sh "<指令>" "<任务ID>"（由 Agent Matrix setup.sh 生成）
+DIR="$(cd "$(dirname "$0")" && pwd)"
+MAP="$DIR/sessions"
+mkdir -p "$MAP"
+sidf="$MAP/oc-$2"
+outf="$MAP/.oc-$2.out"
+trap 'rm -f "$outf"' EXIT
+
+HELP=$(openclaw agent --help 2>&1 || true)
+has() { case "$HELP" in *"$1"*) return 0;; *) return 1;; esac; }
+
+# openclaw 的插件体检等启动诊断会混进输出（stderr 已合并），写回前过滤掉
+show() { sed '/^\[plugins\]/d' "$outf"; }
+
+TIMEOUT=""
+has --timeout && TIMEOUT="--timeout 1800"
+
+# 新版：--session-key 按键路由（不存在即创建）
+if has --session-key; then
+  openclaw agent --session-key "matrix-$2" --message "$1" $TIMEOUT >"$outf" 2>&1
+  rc=$?
+  show
+  exit "$rc"
+fi
+
+# 旧版：--session-id 只能指向已存在的会话
+if ! has --session-id; then
+  echo "openclaw 版本过旧：agent 命令既无 --session-key 也无 --session-id，请升级 openclaw 后重跑 setup.sh" >&2
+  exit 99
+fi
+
+sid=""
+[ -s "$sidf" ] && sid=$(cat "$sidf")
+
+if [ -n "$sid" ]; then
+  openclaw agent --session-id "$sid" --message "$1" $TIMEOUT >"$outf" 2>&1
+  if [ $? -eq 0 ]; then
+    show
+    exit 0
+  fi
+  rm -f "$sidf"   # 会话已失效：降级为首轮重跑
+fi
+
+# 首轮：--to 派生会话；支持 --json 时解析 sessionId 存档供后续轮续用
+if has --json; then
+  openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT --json >"$outf" 2>&1
+  rc=$?
+  show
+  sid=$(show | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin)
+except Exception:
+  print(""); raise SystemExit
+m=d.get("meta") or {}
+am=m.get("agentMeta") or {}
+print(d.get("sessionId") or am.get("sessionId") or m.get("sessionId") or "")' 2>/dev/null)
+  [ -n "$sid" ] && printf '%s' "$sid" > "$sidf"
+  exit "$rc"
+fi
+
+# 连 --json 都没有：只能每轮 --to 派生（同 dest 派生同会话，尽力而为）
+openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT >"$outf" 2>&1
+rc=$?
+show
+exit "$rc"
+EOF
+mv -f "$DIR/.openclaw-round.sh.tmp" "$DIR/openclaw-round.sh"
+
+chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh" "$DIR/openclaw-round.sh"
 command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 整体依赖它"
 
 # ---- 6) 每分钟定时任务（heartbeat.sh 与 task-runner.sh 各一条） ----
+# 单元名/cron 行都以本实例为单位：SFX 后缀区分 launchd 与 systemd 单元名；
+# cron 清理按 "$DIR/" 前缀精确匹配，绝不动其它实例的行。
 SCHED="manual"
+SFX="${AM_INSTANCE:+-$AM_INSTANCE}"
 if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+  mkdir -p "$HOME/Library/LaunchAgents"
   for unit in heartbeat task-runner; do
-    plist="$HOME/Library/LaunchAgents/com.agent-matrix.$unit.plist"
+    plist="$HOME/Library/LaunchAgents/com.agent-matrix$SFX.$unit.plist"
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.agent-matrix.$unit</string>
+  <key>Label</key><string>com.agent-matrix$SFX.$unit</string>
   <key>ProgramArguments</key>
   <array><string>$DIR/$unit.sh</string></array>
   <key>StartInterval</key><integer>60</integer>
@@ -303,19 +403,19 @@ EOF
   done
   SCHED="launchd"
 elif command -v crontab >/dev/null 2>&1; then
-  ( crontab -l 2>/dev/null | grep -v 'agent-matrix/'
+  ( crontab -l 2>/dev/null | grep -v "$DIR/"
     printf '* * * * * %s\n* * * * * %s\n' "$DIR/heartbeat.sh" "$DIR/task-runner.sh" ) | crontab -
   SCHED="cron"
 elif command -v systemctl >/dev/null 2>&1; then
   udir="$HOME/.config/systemd/user"
   mkdir -p "$udir"
   for unit in heartbeat task-runner; do
-    cat > "$udir/agent-matrix-$unit.service" <<EOF
+    cat > "$udir/agent-matrix$SFX-$unit.service" <<EOF
 [Service]
 Type=oneshot
 ExecStart=$DIR/$unit.sh
 EOF
-    cat > "$udir/agent-matrix-$unit.timer" <<EOF
+    cat > "$udir/agent-matrix$SFX-$unit.timer" <<EOF
 [Timer]
 OnBootSec=60
 OnUnitActiveSec=60
@@ -324,7 +424,7 @@ WantedBy=timers.target
 EOF
   done
   systemctl --user daemon-reload 2>/dev/null \
-    && systemctl --user enable --now agent-matrix-heartbeat.timer agent-matrix-task-runner.timer 2>/dev/null \
+    && systemctl --user enable --now "agent-matrix$SFX-heartbeat.timer" "agent-matrix$SFX-task-runner.timer" 2>/dev/null \
     && SCHED="systemd" || say "== 警告: systemd --user 操作失败，请手动 enable 两个 timer"
 fi
 [ "$SCHED" = "manual" ] && say "== 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每分钟触发"
@@ -349,4 +449,4 @@ curl -fsS -m 15 "$AM_URL/api/agent/tasks" -H "Authorization: Bearer $AM_HB_TOKEN
 env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" /bin/sh "$DIR/task-runner.sh" >/dev/null 2>&1 \
   && say "  窄环境 runner: ok" || say "  窄环境 runner: FAIL（检查 PATH 与 AM_RUN_TASK）"
 
-say "AM_SETUP_DONE name=$AM_NAME sched=$SCHED"
+say "AM_SETUP_DONE name=$AM_NAME sched=$SCHED${AM_INSTANCE:+ instance=$AM_INSTANCE}"

@@ -98,7 +98,7 @@ sequenceDiagram
 
 **任务 ID 即会话 ID**，两台官方执行器的绑定方式：
 
-- **OpenClaw**：常驻 Gateway 原生支持会话键，每轮执行 `openclaw agent --session-key "matrix-<任务ID>" --message …`，同任务自动续上同一会话
+- **OpenClaw**：由 setup.sh 生成的 `openclaw-round.sh` 包装。运行时探测 `agent --help` 的参数面自动适配——新版（有 `--session-key`）每轮 `openclaw agent --session-key "matrix-<任务ID>" --message …` 直接按键路由；老版本（如 2026.4.x，无 `--session-key`）自动降级为首轮 `--to "matrix-<任务ID>" --json` 派生会话并解析 sessionId 存档，后续轮 `--session-id` 续上，会话失效自动重派，全程无需手工干预。openclaw 启动时的插件体检等 `[plugins]` 诊断行会在写回结果前自动过滤（治本之道是在 openclaw.json 里配置 `plugins.allow` 显式信任插件）
 - **Hermes Agent**：由 setup.sh 生成的 `hermes-round.sh` 包装——首轮 `hermes chat -q --quiet` 新建会话，从输出解析精确 session_id 存档（`~/.agent-matrix/sessions/<任务ID>`，同时 rename 为 `matrix-<任务ID>` 便于在 `hermes sessions` 里辨认），后续轮 `--resume <sid>` 续上；resume 失败（会话被清理等）自动降级为新会话重跑，取不到 session_id 时退化为每轮新会话，都不影响执行本身
 
 产出文件回收后移入 `out/sent/` 子目录归档，后续轮次不会重复上传，文件仍可被会话读取引用。
@@ -180,7 +180,8 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
 
 ## 备注
-- 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测；要自定义就先设环境变量再执行：AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑 ~/.agent-matrix/config 里的 AM_RUN_TASK 即可。
+- 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测。**这台机器同时装了多个执行器 CLI 时**，在命令前加 AM_EXECUTOR 显式指定你要用哪个（如 AM_EXECUTOR=hermes），脚本会让上报的画像和实际执行通道保持一致。要完全自定义就设 AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑实例目录 config 里的 AM_RUN_TASK 即可。
+- **同一台机器要接入多个互不影响的身份**时（例如同时以 openclaw 和 hermes 两个人格接入），每次接入加上不同的 AM_INSTANCE（如 AM_INSTANCE=hermes）：配置、会话存档、任务文件、定时任务会落在独立的实例目录（~/.agent-matrix-<实例名>），彻底隔离。不加则共用默认目录 ~/.agent-matrix/。
 - 调度环境未被自动识别时（如 Windows），脚本会打印手动安装说明，照做即可。
 ```
 
@@ -188,12 +189,12 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 
 静态逻辑全部托管在服务器上（`GET /setup.sh`，无需鉴权、不含任何密钥），提示词只负责引导。`setup.sh` 做的事：
 
-- **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有 `~/.agent-matrix/config` 则整步跳过，天然幂等，重复执行等于升级）
-- **能力画像采集**：自动探测执行器及版本（`openclaw --version` / `hermes --version`），合并 Agent 自报的 `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`，由 python3 组装成 meta JSON 随注册上报；升级重跑时借一次带 meta 的心跳刷新画像（每分钟的常规心跳不携带，避免无谓流量）。全程可选，不填不影响接入
-- **落盘**：`~/.agent-matrix/config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_RUN_TASK`
-- **执行器自动探测**：官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序找可用的 CLI；OpenClaw 用 `--session-key "matrix-$2"` 实现每任务一会话，Hermes 走生成的 `hermes-round.sh` 包装（首轮建会话存档 session_id，后续轮 `--resume` 续上）；也可用 `AM_RUN_TASK='…'` 环境变量显式指定（`$1`=任务内容、`$2`=任务ID tsk_…）
-- **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）
-- **安装每分钟定时**：macOS → launchd 两个 plist（unload + load 幂等）；Linux → cron 合并两行或 systemd --user 两对 service+timer；都不识别则打印手动安装说明（Windows 场景）
+- **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有本实例的 config 则整步跳过，天然幂等，重复执行等于升级）
+- **能力画像采集**：执行器按 openclaw → hermes 顺序自动探测（多 CLI 共存时可用 `AM_EXECUTOR` 显式指定，画像与实际执行通道始终一致），版本取 `<executor> --version`；合并 Agent 自报的 `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`，由 python3 组装成 meta JSON 随注册上报；升级重跑时借一次带 meta 的心跳刷新画像（每分钟的常规心跳不携带，避免无谓流量）。全程可选，不填不影响接入
+- **落盘**：实例目录的 `config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_INSTANCE` / `AM_RUN_TASK`。默认实例目录是 `~/.agent-matrix`；指定 `AM_INSTANCE=<名字>` 后用 `~/.agent-matrix-<名字>`——同一台机器可接入多个身份，配置、会话存档、任务文件、定时任务按实例彻底隔离
+- **执行器命令**：OpenClaw 走生成的 `openclaw-round.sh` 包装（探测参数面自动适配：新版 `--session-key "matrix-$2"` 每任务一会话；无该参数的老版本自动降级 `--to` 派生 + `--session-id` 续会话），Hermes 走生成的 `hermes-round.sh` 包装（首轮建会话存档 session_id，后续轮 `--resume` 续上）；也可用 `AM_RUN_TASK='…'` 环境变量完全自定义（`$1`=任务内容、`$2`=任务ID tsk_…）
+- **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）；脚本自定位所在实例目录，目录叫什么都能正确工作
+- **安装每分钟定时**：macOS → launchd 两个 plist（unload + load 幂等）；Linux → cron 合并两行或 systemd --user 两对 service+timer；单元名与 cron 清理都按实例后缀区分，互不影响；都不识别则打印手动安装说明（Windows 场景）
 - **自检**：真实跑一次心跳、一次任务拉取，并用 `env -i` 窄环境模拟调度器跑 runner，最后输出 `AM_SETUP_DONE name=… sched=…`
 
 ## 特性

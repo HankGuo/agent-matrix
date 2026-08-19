@@ -200,7 +200,6 @@ main {
 .btn.danger-ghost {
   color: var(--danger);
   border-color: rgba(180, 67, 58, 0.4);
-  margin-top: 8px;
 }
 .btn.full { width: 100%; }
 
@@ -688,6 +687,12 @@ input:focus, textarea:focus {
 .asgn-name { font-weight: 600; font-size: 14px; }
 .asgn .sub { margin-top: 4px; }
 .asgn .btn.text { margin-top: 6px; padding: 3px 10px; font-size: 13px; }
+.result-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.result-bar .btn.text { margin-top: 0; padding: 3px 10px; font-size: 12.5px; }
 .result-view {
   margin-top: 10px;
   background: #f5f7f9;
@@ -780,7 +785,32 @@ input:focus, textarea:focus {
   margin-top: 28px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
+.danger-zone .btn { font-size: 13px; padding: 6px 14px; }
+
+/* 轻量提示条（创建任务/复制成功等瞬时反馈） */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 36px;
+  transform: translateX(-50%) translateY(8px);
+  background: var(--ink);
+  color: var(--panel);
+  font-size: 13.5px;
+  padding: 9px 18px;
+  border-radius: var(--r-ctl);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease);
+  z-index: 90;
+  pointer-events: none;
+  max-width: min(86vw, 480px);
+  text-align: center;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 /* ---- 附件编辑行（新建任务） ---- */
 .att-row {

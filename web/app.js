@@ -23,6 +23,44 @@ async function api(path, opts = {}) {
   return res;
 }
 
+/* 复制到剪贴板：优先异步 clipboard API（安全上下文），
+   微信/移动端 webview 回退 execCommand 路径。返回是否成功。 */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* 落入兜底 */ }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0;";
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length); // iOS Safari 需要
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch { /* 保持 false */ }
+  ta.remove();
+  return ok;
+}
+
+/* 轻量提示条 */
+let toastTimer = null;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.hidden = false;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    t.classList.remove("show");
+    setTimeout(() => (t.hidden = true), 240);
+  }, 2200);
+}
+
 function hideAll() {
   loginView.hidden = true;
   setupView.hidden = true;
@@ -507,16 +545,16 @@ $("#btnGen").addEventListener("click", async () => {
 
 $("#btnCopy").addEventListener("click", async () => {
   const btn = $("#btnCopy");
-  try {
-    await navigator.clipboard.writeText($("#promptText").textContent);
+  if (await copyText($("#promptText").textContent)) {
     btn.textContent = "已复制 ✓";
-  } catch {
+  } else {
+    // 剪贴板不可用时选中文本，给用户手动复制
     const range = document.createRange();
     range.selectNodeContents($("#promptText"));
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
-    btn.textContent = "已选中，请按 ⌘C";
+    btn.textContent = "已选中，请手动复制";
   }
   setTimeout(() => (btn.textContent = "复制指令"), 2000);
 });
@@ -797,9 +835,9 @@ $("#btnCreateTask").addEventListener("click", async () => {
     return;
   }
   closePanels();
-  // 直接进入新任务的详情线程
-  location.hash = "#/tasks/" + data.task.id;
+  // 留在任务列表：新任务出现在列表顶部，由用户自己决定何时点进去
   loadTasks();
+  toast(ids.length ? "任务已创建，派发给 " + ids.length + " 个 Agent" : "任务已创建");
 });
 
 /* ---- 任务详情：按轮次的对话线程 ---- */
@@ -991,7 +1029,18 @@ function assignBlock(a, outs) {
     const pre = document.createElement("pre");
     pre.className = "result-view";
     pre.textContent = a.result;
-    div.append(pre);
+    const bar = document.createElement("div");
+    bar.className = "result-bar";
+    const cp = document.createElement("button");
+    cp.className = "btn text";
+    cp.textContent = "复制结果";
+    cp.addEventListener("click", async () => {
+      const ok = await copyText(a.result);
+      cp.textContent = ok ? "已复制 ✓" : "复制失败，请长按选择";
+      setTimeout(() => (cp.textContent = "复制结果"), 2000);
+    });
+    bar.append(cp);
+    div.append(pre, bar);
   }
   if (outs && outs.length) {
     const oh = document.createElement("p");

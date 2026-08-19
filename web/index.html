@@ -191,8 +191,8 @@
   </div>
 </aside>
 
-<!-- 新建任务（右侧滑出） -->
-<aside class="slideover" id="taskNewPanel" aria-label="新建任务">
+<!-- 新建任务（右侧滑出，宽版：内容/附件/指派一次铺开） -->
+<aside class="slideover wide" id="taskNewPanel" aria-label="新建任务">
   <header class="slideover-head">
     <h2>新建任务</h2>
     <button class="btn text" id="btnTaskNewClose">关闭</button>
@@ -202,7 +202,7 @@
       <input id="taskTitle" placeholder="一句话概括任务" maxlength="120">
     </label>
     <label class="field"><span>任务内容</span>
-      <textarea id="taskContent" rows="8" placeholder="写给 Agent 的完整指令。它会原样收到这段文本，执行后把结果写回。"></textarea>
+      <textarea id="taskContent" rows="12" placeholder="写给 Agent 的完整指令。它会原样收到这段文本，执行后把结果写回。"></textarea>
     </label>
     <div class="field"><span>附件（可选，最多 10 个，单个 ≤100MB）</span>
       <div id="attList"></div>
@@ -228,8 +228,8 @@
     <p class="task-meta"><span id="tdStatus"></span><span class="mono muted small" id="tdId"></span><span class="muted small" id="tdTime"></span></p>
     <div id="tdThread"></div>
     <div class="danger-zone">
-      <button class="btn danger full" id="btnCancelTask" hidden>取消任务</button>
-      <button class="btn danger-ghost full" id="btnDeleteTask">删除任务</button>
+      <button class="btn danger-ghost" id="btnCancelTask" hidden>取消任务</button>
+      <button class="btn danger-ghost" id="btnDeleteTask">删除任务</button>
     </div>
   </div>
   <div class="composer" id="tdComposer">
@@ -242,6 +242,7 @@
   </div>
 </aside>
 
+<div class="toast" id="toast" hidden></div>
 <script src="/app.js"></script>
 </body>
 </html>
