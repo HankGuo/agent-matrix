@@ -509,3 +509,39 @@ func TestTaskFollowupValidation(t *testing.T) {
 		t.Fatalf("已取消任务追加应 409，实际 %d", code)
 	}
 }
+
+// TestTaskDetailBeyondListCap 任务数超过列表上限（200）时，
+// 详情接口仍须返回完整指派（回归：详情曾复用 listTasks 的截断结果）。
+func TestTaskDetailBeyondListCap(t *testing.T) {
+	s, srv := newTestServer(t)
+	a, _ := newAgent(t, s, "worker-1")
+	sess := adminSession(s)
+
+	first, err := s.store.createTask("第 1 个任务", "正文", []string{a.ID})
+	if err != nil {
+		t.Fatalf("创建任务失败: %v", err)
+	}
+	for i := 0; i < 200; i++ {
+		if _, err := s.store.createTask("填充任务", "正文", []string{a.ID}); err != nil {
+			t.Fatalf("创建填充任务失败: %v", err)
+		}
+	}
+
+	// 列表只返回最近 200 条，最早的任务不在其中
+	_, body := doJSON(t, "GET", srv.URL+"/api/tasks", nil, sess, "")
+	for _, item := range mustJSON(t, body)["tasks"].([]any) {
+		if item.(map[string]any)["id"] == first.ID {
+			t.Fatal("最早的任务应被列表截断，不应出现在最近 200 条中")
+		}
+	}
+
+	// 但详情必须能查到，且带完整指派
+	code, body := doJSON(t, "GET", srv.URL+"/api/tasks/"+first.ID, nil, sess, "")
+	if code != http.StatusOK {
+		t.Fatalf("详情应 200，实际 %d: %s", code, body)
+	}
+	as := mustJSON(t, body)["assignments"].([]any)
+	if len(as) != 1 || as[0].(map[string]any)["agent_id"] != a.ID {
+		t.Fatalf("详情应返回完整指派: %v", as)
+	}
+}

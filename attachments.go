@@ -40,9 +40,9 @@ type incomingFile struct {
 	mime string
 }
 
-// parseTaskMultipart 流式解析建任务的 multipart 表单：字段与文件顺序无关，
-// 文件边收边落盘（先于任务记录存在），解析失败时清理已落盘的临时文件。
-// desc 与 file 按出现顺序一一配对（前端按 desc_i + file_i 的顺序追加）。
+// parseTaskMultipart 流式解析建任务的 multipart 表单：文件边收边落盘（先于任务记录存在），
+// 解析失败时清理已落盘的临时文件。desc 与 file 按到达顺序一一配对——每个 desc 必须在
+// 其对应 file 之前到达（前端按 desc_i + file_i 的顺序交替追加）。
 func (s *server) parseTaskMultipart(w http.ResponseWriter, r *http.Request) (title, content string, agentIDs []string, files []incomingFile, ok bool) {
 	// 兜底上限：10 个文件 × 100MB + 字段余量；单文件上限在 blob.Put 里硬截断。
 	r.Body = http.MaxBytesReader(w, r.Body, (maxAttachmentSize+1<<20)*maxAttachmentsPerTask)
@@ -313,28 +313,6 @@ func (s *server) handleUploadOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("产出附件已上传: %s（指派 %s，%d 字节）", saved.Name, aid, saved.Size)
 	writeJSON(w, http.StatusCreated, map[string]any{"attachment": saved})
-}
-
-// handleDeleteTask 删除任务：级联删除指派、附件记录与磁盘文件，历史不保留。
-func (s *server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	keys, err := s.store.deleteTask(id)
-	switch {
-	case errors.Is(err, errTaskNotFound):
-		writeError(w, http.StatusNotFound, "任务不存在")
-		return
-	case err != nil:
-		log.Printf("删除任务失败: %v", err)
-		writeError(w, http.StatusInternalServerError, "内部错误")
-		return
-	}
-	for _, k := range keys {
-		if err := s.blob.Delete(k); err != nil {
-			log.Printf("清理附件文件失败 (%s): %v", k, err)
-		}
-	}
-	log.Printf("任务已删除: %s（清理 %d 个附件文件）", id, len(keys))
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // deleteAttachmentsOfAgent 删除 Agent 时清理其全部产出附件（记录 + 文件）。

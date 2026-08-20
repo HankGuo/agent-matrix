@@ -118,6 +118,10 @@ func (s *server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 
 // ---- 简单滑动窗口限流 ----
 
+// rateKeyCap 是 hits 的容量兜底：超过即全量清扫过期 key，
+// 防止海量一次性来源（如公网扫描器）的 IP 永久滞留内存。
+const rateKeyCap = 10000
+
 type rateLimiter struct {
 	mu     sync.Mutex
 	limit  int
@@ -129,11 +133,31 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	return &rateLimiter{limit: limit, window: window, hits: make(map[string][]time.Time)}
 }
 
+// sweepLocked 删除窗口内已无记录的 key。调用方须持锁。
+func (l *rateLimiter) sweepLocked(cutoff time.Time) {
+	for k, ts := range l.hits {
+		fresh := ts[:0]
+		for _, t := range ts {
+			if t.After(cutoff) {
+				fresh = append(fresh, t)
+			}
+		}
+		if len(fresh) == 0 {
+			delete(l.hits, k)
+		} else {
+			l.hits[k] = fresh
+		}
+	}
+}
+
 func (l *rateLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-l.window)
+	if len(l.hits) >= rateKeyCap {
+		l.sweepLocked(cutoff)
+	}
 	kept := l.hits[key][:0]
 	for _, t := range l.hits[key] {
 		if t.After(cutoff) {

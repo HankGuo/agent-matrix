@@ -57,7 +57,7 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// clean 去掉控制字符并限制长度。
+// clean 去掉控制字符并限制长度（按字符数截断，不会切断多字节字符）。
 func clean(s string, max int) string {
 	s = strings.TrimSpace(s)
 	var b strings.Builder
@@ -67,11 +67,11 @@ func clean(s string, max int) string {
 		}
 		b.WriteRune(r)
 	}
-	out := b.String()
-	if len(out) > max {
-		out = out[:max]
+	r := []rune(b.String())
+	if len(r) > max {
+		return string(r[:max])
 	}
-	return out
+	return string(r)
 }
 
 func securityHeaders(next http.Handler) http.Handler {

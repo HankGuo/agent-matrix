@@ -12,8 +12,10 @@ let useTokenLogin = false;
 let firstLoad = true;
 
 async function api(path, opts = {}) {
+  // FormData 由浏览器自带 boundary，不能手动设 Content-Type
+  const isForm = opts.body instanceof FormData;
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    ...(isForm ? {} : { headers: { "Content-Type": "application/json" } }),
     ...opts,
   });
   if (res.status === 401 && path !== "/api/login" && path !== "/api/setup") {
@@ -47,17 +49,23 @@ async function copyText(text) {
   return ok;
 }
 
-/* 轻量提示条 */
+/* 轻量提示条：toastSeq 代数保证连发时旧回调不会提前隐藏新 toast */
 let toastTimer = null;
+let toastSeq = 0;
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg;
   t.hidden = false;
   t.classList.add("show");
   clearTimeout(toastTimer);
+  const seq = ++toastSeq;
   toastTimer = setTimeout(() => {
+    if (seq !== toastSeq) return;
     t.classList.remove("show");
-    setTimeout(() => (t.hidden = true), 240);
+    setTimeout(() => {
+      if (seq !== toastSeq) return;
+      t.hidden = true;
+    }, 240);
   }, 2200);
 }
 
@@ -118,7 +126,7 @@ function applyHash() {
     setView("tasks");
   }
   if (m) {
-    openTaskDetail(m[1], true);
+    openTaskDetail(m[1]);
   } else if (currentTaskId) {
     closePanels(); // 从详情退回列表（浏览器后退等）时关闭面板
   }
@@ -535,18 +543,24 @@ $("#btnSaveSettings").addEventListener("click", async () => {
 });
 
 $("#btnGen").addEventListener("click", async () => {
-  const res = await api("/api/enrollments", {
-    method: "POST",
-    body: JSON.stringify({ label: $("#enrollLabel").value }),
-  });
-  if (!res.ok) {
-    alert("生成失败：" + (await res.json()).error);
-    return;
+  const btn = $("#btnGen");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/enrollments", {
+      method: "POST",
+      body: JSON.stringify({ label: $("#enrollLabel").value }),
+    });
+    if (!res.ok) {
+      alert("生成失败：" + (await res.json()).error);
+      return;
+    }
+    const data = await res.json();
+    $("#enrollForm").hidden = true;
+    $("#enrollResult").hidden = false;
+    $("#promptText").textContent = data.prompt;
+  } finally {
+    btn.disabled = false;
   }
-  const data = await res.json();
-  $("#enrollForm").hidden = true;
-  $("#enrollResult").hidden = false;
-  $("#promptText").textContent = data.prompt;
 });
 
 $("#btnCopy").addEventListener("click", async () => {
@@ -798,36 +812,35 @@ $("#btnCreateTask").addEventListener("click", async () => {
   errEl.hidden = true;
   const ids = [...document.querySelectorAll("#agentPicker input:checked")].map((i) => i.value);
   const btn = $("#btnCreateTask");
+  // 两条路径统一防重：连点不得创建重复任务
+  btn.disabled = true;
+  btn.textContent = pendingAtts.length ? "上传中…" : "创建中…";
   let res;
-  if (pendingAtts.length) {
-    // 有附件走 multipart：desc_i 与 file_i 按序配对
-    const fd = new FormData();
-    fd.append("title", $("#taskTitle").value);
-    fd.append("content", $("#taskContent").value);
-    fd.append("agent_ids", ids.join(","));
-    for (const p of pendingAtts) {
-      fd.append("desc", p.descEl.value);
-      fd.append("file", p.file, p.file.name);
+  try {
+    if (pendingAtts.length) {
+      // 有附件走 multipart：desc_i 与 file_i 按序配对（desc 必须在对应 file 之前）
+      const fd = new FormData();
+      fd.append("title", $("#taskTitle").value);
+      fd.append("content", $("#taskContent").value);
+      fd.append("agent_ids", ids.join(","));
+      for (const p of pendingAtts) {
+        fd.append("desc", p.descEl.value);
+        fd.append("file", p.file, p.file.name);
+      }
+      res = await api("/api/tasks", { method: "POST", body: fd }).catch(() => null);
+    } else {
+      res = await api("/api/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          title: $("#taskTitle").value,
+          content: $("#taskContent").value,
+          agent_ids: ids,
+        }),
+      }).catch(() => null);
     }
-    btn.disabled = true;
-    btn.textContent = "上传中…";
-    try {
-      res = await fetch("/api/tasks", { method: "POST", body: fd, credentials: "same-origin" });
-    } catch {
-      res = null;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "创建任务";
-    }
-  } else {
-    res = await api("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({
-        title: $("#taskTitle").value,
-        content: $("#taskContent").value,
-        agent_ids: ids,
-      }),
-    }).catch(() => null);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "创建任务";
   }
   if (!res) {
     errEl.textContent = "网络错误，请重试";
@@ -848,20 +861,36 @@ $("#btnCreateTask").addEventListener("click", async () => {
 
 /* ---- 任务详情：按轮次的对话线程 ---- */
 let currentTaskId = null;
+// 追问草稿按任务隔离：切换任务时暂存/恢复，避免草稿串到别的任务
+const fuDrafts = new Map();
 
-async function openTaskDetail(id, fromHash) {
-  currentTaskId = id;
-  if (!fromHash && location.hash !== "#/tasks/" + id) {
-    location.hash = "#/tasks/" + id;
-  }
+async function openTaskDetail(id) {
   if (!agentsCache.length) await loadAgents(); // 继续任务的选择器需要 Agent 名单
+  let d;
   try {
     const res = await api("/api/tasks/" + encodeURIComponent(id));
-    if (!res.ok) return;
-    renderTaskDetail(await res.json(), true);
-    taskDetailPanel.classList.add("show");
-    panelMask.classList.add("show");
-  } catch { /* 网络错误时保持现状 */ }
+    if (!res.ok) {
+      toast("任务不存在或加载失败");
+      return;
+    }
+    d = await res.json();
+  } catch {
+    toast("网络错误，请重试");
+    return;
+  }
+  // 确认能加载后再切换状态：先存旧任务草稿，再恢复目标任务草稿
+  const input = $("#fuContent");
+  if (currentTaskId && currentTaskId !== id && input.value.trim()) {
+    fuDrafts.set(currentTaskId, input.value);
+  }
+  input.value = fuDrafts.get(id) || "";
+  currentTaskId = id;
+  if (location.hash !== "#/tasks/" + id) {
+    location.hash = "#/tasks/" + id;
+  }
+  renderTaskDetail(d, true);
+  taskDetailPanel.classList.add("show");
+  panelMask.classList.add("show");
 }
 
 /* 面板打开时的静默刷新：保留滚动位置（本来在底部则贴底） */
@@ -1063,9 +1092,10 @@ function renderFollowupPicker(d) {
   const picker = $("#fuPicker");
   const inTask = new Set();
   for (const a of d.assignments || []) inTask.add(a.agent_id);
-  // 已勾选的尽量保留（静默刷新时不打断用户编辑）
+  // 已勾选的尽量保留（静默刷新时不打断用户编辑）。
+  // 同一任务即保留勾选——包括"全部取消勾选"的状态，轮询不得静默恢复默认勾选
   const prevChecked = new Set([...picker.querySelectorAll("input:checked")].map((i) => i.value));
-  const keep = picker.dataset.taskId === d.task.id && prevChecked.size > 0;
+  const keep = picker.dataset.taskId === d.task.id;
   picker.dataset.taskId = d.task.id;
   picker.replaceChildren();
   for (const a of agentsCache) {
@@ -1121,6 +1151,7 @@ $("#btnFollowup").addEventListener("click", async () => {
     return;
   }
   $("#fuContent").value = "";
+  fuDrafts.delete(currentTaskId); // 已发送的草稿不再保留
   refreshTaskDetail();
   loadTasks();
 });

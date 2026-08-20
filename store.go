@@ -27,7 +27,9 @@ type Agent struct {
 type store struct{ db *sql.DB }
 
 func openStore(path string) (*store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path)
+	// 用校验过的简写键而非 _pragma：驱动文档声明简写键在任何 PRAGMA 生效前先整体校验，
+	// 而 _pragma 逐条原样执行、不做校验（modernc.org/sqlite Driver.Open 文档）。
+	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=1", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -493,6 +495,37 @@ func (s *store) createFollowup(taskID, content string, agentIDs []string) (int, 
 	return seq, tx.Commit()
 }
 
+// assignCols 是指派查询的统一列清单（LEFT JOIN agents 取名字与最后心跳）。
+const assignCols = `a.id, a.task_id, a.agent_id, COALESCE(g.name, ''), a.seq, a.content, a.created_at, a.status,
+        a.delivered_at, a.result, a.result_at, COALESCE(g.last_seen, 0)`
+
+// scanAssignments 扫描指派行集并关闭 rows。
+func scanAssignments(rows *sql.Rows) ([]Assignment, error) {
+	defer rows.Close()
+	out := []Assignment{}
+	for rows.Next() {
+		var a Assignment
+		if err := rows.Scan(&a.ID, &a.TaskID, &a.AgentID, &a.AgentName, &a.Seq, &a.Content, &a.CreatedAt, &a.Status,
+			&a.DeliveredAt, &a.Result, &a.ResultAt, &a.AgentLastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// assignmentsForTask 返回单个任务的全部指派（按轮次与创建顺序）。
+// 详情页专用：精确按 task_id 查，不受任务列表 200 条上限影响。
+func (s *store) assignmentsForTask(taskID string) ([]Assignment, error) {
+	rows, err := s.db.Query(
+		`SELECT `+assignCols+` FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
+		 WHERE a.task_id = ? ORDER BY a.seq, a.rowid`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return scanAssignments(rows)
+}
+
 // listTasks 返回最近的任务及其指派（按任务创建时间倒序，指派按创建顺序）。
 func (s *store) listTasks(limit int) ([]Task, map[string][]Assignment, error) {
 	rows, err := s.db.Query(
@@ -515,27 +548,23 @@ func (s *store) listTasks(limit int) ([]Task, map[string][]Assignment, error) {
 		return nil, nil, err
 	}
 
-	assigns := map[string][]Assignment{}
 	arows, err := s.db.Query(
-		`SELECT a.id, a.task_id, a.agent_id, COALESCE(g.name, ''), a.seq, a.content, a.created_at, a.status,
-		        a.delivered_at, a.result, a.result_at, COALESCE(g.last_seen, 0)
-		 FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
+		`SELECT ` + assignCols + ` FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
 		 ORDER BY a.seq, a.rowid`)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer arows.Close()
-	for arows.Next() {
-		var a Assignment
-		if err := arows.Scan(&a.ID, &a.TaskID, &a.AgentID, &a.AgentName, &a.Seq, &a.Content, &a.CreatedAt, &a.Status,
-			&a.DeliveredAt, &a.Result, &a.ResultAt, &a.AgentLastSeen); err != nil {
-			return nil, nil, err
-		}
+	all, err := scanAssignments(arows)
+	if err != nil {
+		return nil, nil, err
+	}
+	assigns := map[string][]Assignment{}
+	for _, a := range all {
 		if keep[a.TaskID] {
 			assigns[a.TaskID] = append(assigns[a.TaskID], a)
 		}
 	}
-	return tasks, assigns, arows.Err()
+	return tasks, assigns, nil
 }
 
 // taskByID 读取单个任务，不存在时返回 errTaskNotFound。

@@ -6,8 +6,9 @@
 #   升级/换装：sh setup.sh            （已有 <实例目录>/config 时跳过注册，直接更新脚本与定时任务）
 #   指定执行器：AM_EXECUTOR=hermes sh setup.sh   （多 CLI 共存时显式选定，画像与实际执行通道始终一致）
 #   单机多身份：AM_INSTANCE=writer AM_NAME="…" sh setup.sh   （实例目录 ~/.agent-matrix-writer，完全隔离）
-#   自定义命令：AM_RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1"' sh setup.sh
 #   初始轮询间隔：AM_INTERVAL=30 sh setup.sh   （秒；装完后随服务端「设置」里的全局间隔自动跟进）
+#
+# 仅支持 Linux / macOS；仅支持 OpenClaw 与 Hermes Agent 两家执行器。
 #
 # 自动完成：注册换发凭证 → 落盘 <实例目录> → 安装心跳与任务执行器 →
 #           安装定时任务（cron / launchd / systemd user timer，间隔随服务端设置自动跟进）→ 自检。
@@ -92,8 +93,8 @@ else
 fi
 
 # ---- 3) 选定任务执行命令（写入 config，之后改命令只需编辑 config） ----
-# 官方支持 OpenClaw 与 Hermes Agent 两家执行器；RUN_TASK 跟随第 1 步选定的 EXECUTOR，
-# 上报画像与实际执行通道永远一致（可用 AM_RUN_TASK 完全自定义，此时画像以 AM_EXECUTOR 为准）：
+# 仅支持 OpenClaw 与 Hermes Agent 两家执行器；RUN_TASK 跟随第 1 步选定的 EXECUTOR，
+# 上报画像与实际执行通道永远一致：
 #   openclaw: 走常驻 Gateway 的一个 agent turn，--session-key 即任务 ID
 #   hermes:   经 hermes-round.sh 包装——首轮 chat -q 建会话并记录 session_id，后续轮 --resume 续上
 RUN_TASK="${AM_RUN_TASK:-}"
@@ -101,7 +102,7 @@ if [ -z "$RUN_TASK" ]; then
   case "$EXECUTOR" in
     openclaw) RUN_TASK="sh $DIR/openclaw-round.sh \"\$1\" \"\$2\"";;
     hermes)   RUN_TASK="sh $DIR/hermes-round.sh \"\$1\" \"\$2\"";;
-    *)        RUN_TASK='echo "未探测到 openclaw / hermes CLI：请先安装其一、用 AM_EXECUTOR 指定，或编辑 config 把 AM_RUN_TASK 改成你的一次性非交互执行命令（$1=任务内容 $2=任务ID）" >&2; exit 99';;
+    *)        die "未探测到 openclaw / hermes CLI：请先安装其中之一再接入（仅支持这两家执行器）";;
   esac
 fi
 case "$RUN_TASK" in *"'"*) die "AM_RUN_TASK 不能包含单引号";; esac
@@ -491,7 +492,7 @@ TMR
     && SCHED="systemd" || echo "install-scheduler: systemd --user 操作失败，请手动 enable 两个 timer" >&2
 fi
 if [ "$SCHED" = "manual" ]; then
-  echo "install-scheduler: 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每 $SECS 秒触发" >&2
+  echo "install-scheduler: 未识别的调度环境：请手动为 heartbeat.sh 与 task-runner.sh 安装每 $SECS 秒触发" >&2
 fi
 echo "$SCHED"
 EOSCHED
@@ -501,7 +502,7 @@ mv -f "$DIR/.install-scheduler.sh.tmp" "$DIR/install-scheduler.sh"
 SECS="${AM_INTERVAL:-60}"
 printf '%s\n' "$SECS" > "$DIR/poll-interval"
 SCHED=$(sh "$DIR/install-scheduler.sh" "$SECS")
-[ "$SCHED" = "manual" ] && say "== 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每 $SECS 秒触发"
+[ "$SCHED" = "manual" ] && say "== 未识别的调度环境：请手动为 heartbeat.sh 与 task-runner.sh 安装每 $SECS 秒触发"
 say "== 定时任务: ${SCHED}（每 ${SECS} 秒 × 2，之后随服务端全局设置自动调整）"
 
 # ---- 8) 自检 ----

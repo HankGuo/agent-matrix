@@ -18,8 +18,7 @@ const (
 
 var errAttTooLarge = fmt.Errorf("单个附件不能超过 %dMB", maxAttachmentSize>>20)
 
-// blobStore 是附件字节存储的抽象。local 驱动落盘在本机目录；
-// S3 驱动（预签名直传）作为扩展点预留，选择 AGENT_MATRIX_STORAGE=s3 时启用（尚未实现）。
+// blobStore 是附件字节存储的抽象，当前仅 local 驱动：落盘本机目录。
 type blobStore interface {
 	// Put 流式写入，先落临时文件再 rename（崩溃不留半截文件）；返回实际大小与嗅探出的 MIME。
 	Put(key string, r io.Reader) (size int64, mime string, err error)

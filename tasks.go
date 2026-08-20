@@ -317,12 +317,11 @@ func (s *server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	_, assigns, err := s.store.listTasks(taskListLimit)
+	as, err := s.store.assignmentsForTask(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	as := assigns[id]
 	// 附件：输入件平铺列出，产出件按指派分组
 	atts, err := s.store.taskAttachments(id)
 	if err != nil {
@@ -376,6 +375,28 @@ func (s *server) handleRequeueAssignment(w http.ResponseWriter, r *http.Request)
 	default:
 		writeError(w, http.StatusInternalServerError, "内部错误")
 	}
+}
+
+// handleDeleteTask 删除任务：级联删除指派、附件记录与磁盘文件，历史不保留。
+func (s *server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	keys, err := s.store.deleteTask(id)
+	switch {
+	case errors.Is(err, errTaskNotFound):
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	case err != nil:
+		log.Printf("删除任务失败: %v", err)
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	for _, k := range keys {
+		if err := s.blob.Delete(k); err != nil {
+			log.Printf("清理附件文件失败 (%s): %v", k, err)
+		}
+	}
+	log.Printf("任务已删除: %s（清理 %d 个附件文件）", id, len(keys))
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // handleCreateFollowup 给已有任务追加一轮指令（继续任务）。
