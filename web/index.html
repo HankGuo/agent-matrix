@@ -184,6 +184,10 @@
       <input id="setBaseURL" placeholder="https://matrix.example.com" inputmode="url">
     </label>
     <p class="hint">Agent 的注册与心跳请求都发往这个地址，新生成的接入指令立即生效。<br>注意：已接入 Agent 的心跳地址在首次注册时已写入其本地配置，改地址后需要重新接入。</p>
+    <label class="field"><span>轮询间隔（秒）</span>
+      <input id="setPollInterval" type="number" min="10" max="3600" step="1" placeholder="60" inputmode="numeric">
+    </label>
+    <p class="hint">Agent 心跳与任务拉取的频率，全局生效，10-3600 秒。改动随心跳下发，各实例一分钟内自动重装本机定时任务，无需重新接入。cron 环境的机器只支持分钟粒度，会自动向下取整。</p>
     <button class="btn primary full" id="btnSaveSettings">保存</button>
     <p class="ok" id="settingsSaved" hidden>已保存</p>
     <div class="divider"></div>

@@ -71,6 +71,31 @@ func TestRegisterWithMeta(t *testing.T) {
 	}
 }
 
+// TestRegisterDuplicateName 验证同名注册被拒（409）：名称全局唯一，
+// 且拒注册不核销令牌，换个名称仍可注册成功。
+func TestRegisterDuplicateName(t *testing.T) {
+	s, srv := newTestServer(t)
+	enrollAndRegister(t, srv, s, "") // 占用名称 "bot"
+
+	token, _, err := s.store.createEnrollment("t2", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := doJSON(t, "POST", srv.URL+"/api/register", map[string]string{
+		"token": token, "name": "bot",
+	}, "", "")
+	if code != 409 {
+		t.Fatalf("同名注册状态码 = %d, body = %s", code, body)
+	}
+	// 令牌未被核销：换名重试应成功
+	code, body = doJSON(t, "POST", srv.URL+"/api/register", map[string]string{
+		"token": token, "name": "bot-2",
+	}, "", "")
+	if code != 201 {
+		t.Fatalf("换名注册状态码 = %d, body = %s", code, body)
+	}
+}
+
 // TestRegisterMetaValidation 验证非法 meta 被拒：非 JSON 对象文本、超长。
 func TestRegisterMetaValidation(t *testing.T) {
 	s, srv := newTestServer(t)

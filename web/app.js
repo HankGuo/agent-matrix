@@ -502,6 +502,7 @@ $("#btnSettings").addEventListener("click", async () => {
     if (res.ok) {
       const data = await res.json();
       $("#setBaseURL").value = data.base_url || "";
+      $("#setPollInterval").value = data.poll_interval || 60;
       $("#settingsVer").textContent = "Agent Matrix v" + (data.version || "");
     }
   } catch { /* 保持旧值 */ }
@@ -513,9 +514,13 @@ $("#btnSettings").addEventListener("click", async () => {
 $("#btnSettingsClose").addEventListener("click", closePanels);
 
 $("#btnSaveSettings").addEventListener("click", async () => {
+  const interval = parseInt($("#setPollInterval").value, 10);
   const res = await api("/api/settings", {
     method: "POST",
-    body: JSON.stringify({ base_url: $("#setBaseURL").value }),
+    body: JSON.stringify({
+      base_url: $("#setBaseURL").value,
+      poll_interval: Number.isInteger(interval) ? interval : null,
+    }),
   });
   const data = await res.json();
   if (!res.ok) {
@@ -523,6 +528,7 @@ $("#btnSaveSettings").addEventListener("click", async () => {
     return;
   }
   $("#setBaseURL").value = data.base_url;
+  $("#setPollInterval").value = data.poll_interval;
   const ok = $("#settingsSaved");
   ok.hidden = false;
   setTimeout(() => (ok.hidden = true), 2000);

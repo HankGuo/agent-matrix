@@ -9,12 +9,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
-
-// heartbeatInterval 是建议的心跳间隔（秒），随注册响应下发。
-const heartbeatInterval = 60
 
 type server struct {
 	cfg        *config
@@ -126,6 +124,15 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "meta 必须是 2KB 以内的 JSON 对象")
 		return
 	}
+	// 名称全局唯一：先查再核销令牌，重名时令牌保持有效，换名即可重试
+	if exists, err := s.store.agentNameExists(req.Name); err != nil {
+		log.Printf("检查名称占用失败: %v", err)
+		writeError(w, http.StatusInternalServerError, "内部错误")
+		return
+	} else if exists {
+		writeError(w, http.StatusConflict, "登记名称已被占用，请换一个 AM_NAME 重试")
+		return
+	}
 	if _, err := s.store.consumeEnrollment(req.Token); err != nil {
 		if errors.Is(err, errInvalidToken) {
 			writeError(w, http.StatusUnauthorized, "注册令牌无效、已使用或已过期")
@@ -136,7 +143,11 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a, raw, err := s.store.createAgent(req.Name, req.Hostname, req.OS, req.Arch, ip, req.Meta)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNameTaken):
+		writeError(w, http.StatusConflict, "登记名称已被占用，请换一个 AM_NAME 重试")
+		return
+	case err != nil:
 		log.Printf("创建 Agent 失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -145,7 +156,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"agent_id":           a.ID,
 		"heartbeat_token":    raw,
-		"heartbeat_interval": heartbeatInterval,
+		"heartbeat_interval": s.store.pollInterval(),
 		"server_time":        time.Now().Unix(),
 	})
 }
@@ -185,7 +196,12 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "server_time": time.Now().Unix()})
+	// 随心跳下发全局轮询间隔：Agent 侧 heartbeat.sh 据此机械调整本机定时任务
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"server_time":   time.Now().Unix(),
+		"poll_interval": s.store.pollInterval(),
+	})
 }
 
 // ---- 管理端接口 ----
@@ -232,15 +248,18 @@ func normalizeBaseURL(s string) (string, error) {
 // handleGetSettings 返回当前设置（管理端）。
 func (s *server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"base_url": s.baseURL(),
-		"version":  version,
+		"base_url":      s.baseURL(),
+		"version":       version,
+		"poll_interval": s.store.pollInterval(),
 	})
 }
 
-// handleUpdateSettings 更新设置（管理端）。目前仅支持平台地址。
+// handleUpdateSettings 更新设置（管理端）：平台地址 + 全局轮询间隔（秒）。
+// 轮询间隔随每次心跳下发，各 Agent 实例一分钟内机械跟进，无需重新接入。
 func (s *server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BaseURL string `json:"base_url"`
+		BaseURL      string `json:"base_url"`
+		PollInterval *int   `json:"poll_interval"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -250,13 +269,25 @@ func (s *server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.PollInterval != nil && (*req.PollInterval < 10 || *req.PollInterval > 3600) {
+		writeError(w, http.StatusBadRequest, "轮询间隔需在 10-3600 秒之间")
+		return
+	}
 	if err := s.store.setSetting("base_url", u); err != nil {
 		log.Printf("保存设置失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	if req.PollInterval != nil {
+		if err := s.store.setSetting("poll_interval", strconv.Itoa(*req.PollInterval)); err != nil {
+			log.Printf("保存轮询间隔失败: %v", err)
+			writeError(w, http.StatusInternalServerError, "内部错误")
+			return
+		}
+		log.Printf("轮询间隔已更新: %ds", *req.PollInterval)
+	}
 	log.Printf("平台地址已更新: %s", u)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "base_url": u})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "base_url": u, "poll_interval": s.store.pollInterval()})
 }
 
 // handleSetup 首次访问初始化管理员账号，仅在无任何账号时可用。

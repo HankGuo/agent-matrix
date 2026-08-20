@@ -75,9 +75,9 @@ flowchart LR
     end
 
     B -->|"HTTPS 管理"| S
-    G1 -->|"POST /api/heartbeat（每分钟）"| S
-    G2 -->|"POST /api/heartbeat（每分钟）"| S
-    G3 -->|"POST /api/heartbeat（每分钟）"| S
+    G1 -->|"POST /api/heartbeat（间隔可调，默认每分钟）"| S
+    G2 -->|"POST /api/heartbeat（间隔可调，默认每分钟）"| S
+    G3 -->|"POST /api/heartbeat（间隔可调，默认每分钟）"| S
     G1 -.->|"GET /api/agent/tasks 拉取任务<br/>POST …/result 写回结果"| S
     G1 -.->|"GET /setup.sh（安装/升级脚本）"| S
     B -.->|"① 复制接入指令（带一次性令牌）"| P[" "]
@@ -115,11 +115,11 @@ sequenceDiagram
     A->>G: 粘贴指令（带外通道：IM / SSH / 控制台）
     G->>S: GET /setup.sh（下载幂等安装脚本，不含密钥）
     G->>S: POST /api/register（核销一次性令牌）
-    S-->>G: agent_id + 心跳令牌 amh_… + 建议间隔 60s
+    S-->>G: agent_id + 心跳令牌 amh_… + 建议间隔（默认 60s，设置里可全局调整）
     G->>G: setup.sh 落盘 config 与两个脚本，安装定时任务，自检
-    loop 每分钟
-        G->>S: POST /api/heartbeat（Bearer amh_…）
-        S-->>G: {"ok": true, "server_time": …}
+    loop 每个轮询周期（默认每分钟）
+        G->>S: POST /api/heartbeat（Bearer amh_…，携带 meta.json 能力画像）
+        S-->>G: {"ok": true, "server_time": …, "poll_interval": 60}
     end
     A->>S: GET /api/agents（WebUI 每 15s 轮询）
     S-->>A: 在线状态（最后心跳 ≤ 3 分钟判定在线）
@@ -209,7 +209,7 @@ WantedBy=multi-user.target
 
 ## 📬 任务派发
 
-管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent，可携带最多 10 个附件（单个 ≤100MB，每个附件可单独填一句说明）。每台 Agent 机器上的 `task-runner.sh` 每分钟拉取任务，**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 `openclaw` → `hermes` 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙。
+管理员在「任务」页写下任务内容并 @ 一个或多个已接入的 Agent，可携带最多 10 个附件（单个 ≤100MB，每个附件可单独填一句说明）。每台 Agent 机器上的 `task-runner.sh` 按轮询间隔拉取任务（默认每分钟，可在「设置」里全局调整），**调用 Agent 自己的一次性 CLI 命令执行**（接入时按 `openclaw` → `hermes` 顺序自动探测，也可编辑 `~/.agent-matrix/config` 里的 `AM_RUN_TASK` 自定义），按退出码**机械回写**结果——不依赖 Agent 记住任何约定。全程只有 Agent 的出站请求，天然穿透 NAT 与防火墙。
 
 > ⚠️ **执行器版本要求**：
 > - **OpenClaw**：`setup.sh` 运行时会 probe `openclaw agent --help` 按能力自动适配，不要求固定版本号。四档兼容：有 `--session-key`（新版，最优体验，每任务一会话直接按键路由）→ 有 `--session-id`（首轮 `--to` 派生会话 + 解析 sessionId 存档，后续轮 `--session-id` 续上；resume 失败删存档降级）→ 只有 `--to`（每轮 `--to` 派生，同 dest 尽力复用会话，无续写保证）→ 三者均无（报错退出，需升级）。**旧版 OpenClaw（只有 `--to` 但没有 `--session-id`）不再被错误拦截**，会正常走 `--to` 派生流程。
@@ -270,7 +270,7 @@ sequenceDiagram
     participant G as Agent（自治执行）
 
     A->>S: POST /api/tasks（标题 + 内容 + 附件 + @ 1~20 个 Agent）
-    loop 每分钟（task-runner.sh，目录锁防重入）
+    loop 每个轮询周期（默认每分钟，task-runner.sh，目录锁防重入）
         G->>S: GET /api/agent/tasks（Bearer amh_…）
         S-->>G: 属于它的任务（原子置 delivered）+ 附件清单
         G->>S: GET /api/agent/attachments/{id}（下载输入件到本机）
@@ -308,8 +308,8 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
     AM_SKILLS='你的技能，逗号分隔、每项一个词，如 code,web-search,review' \
     sh /tmp/am-setup.sh
    登记边界（必须遵守）：只写公开能力描述；不要复制系统提示词或 SOUL 文件全文；不要包含任何密钥、token、内网地址。不确定的项直接删掉对应变量再执行，不要编造。
-   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检。
-3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
+   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装定时任务（cron / launchd / systemd，自动识别）→ 自检。
+3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；409 说明登记名称已被占用，把 AM_NAME 换成一个未占用的名称重跑即可（令牌不受影响）；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
 
 ## 汇报
 把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
@@ -318,6 +318,7 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 - 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测。**这台机器同时装了多个执行器 CLI 时**，在命令前加 AM_EXECUTOR 显式指定你要用哪个（如 AM_EXECUTOR=hermes），脚本会让上报的画像和实际执行通道保持一致。要完全自定义就设 AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑实例目录 config 里的 AM_RUN_TASK 即可。
 - **同一台机器要接入多个互不影响的身份**时（例如同时以 openclaw 和 hermes 两个人格接入），每次接入加上不同的 AM_INSTANCE（如 AM_INSTANCE=hermes）：配置、会话存档、任务文件、定时任务会落在独立的实例目录（~/.agent-matrix-<实例名>），彻底隔离。不加则共用默认目录 ~/.agent-matrix/。
 - 调度环境未被自动识别时（如 Windows），脚本会打印手动安装说明，照做即可。
+- 你的能力资料（执行器/人设/模型/技能）保存在实例目录的 meta.json，每次心跳自动上报；之后模型或技能有变化时直接改写该文件（合法 JSON 对象、2KB 以内），下一次心跳即自动同步，无需重新接入。
 ```
 
 </details>
@@ -331,11 +332,11 @@ WebUI 生成的指令长这样（真实输出，一字未改）。复制后原�
 `setup.sh` 是幂等安装脚本，重复执行 = 升级到最新执行器：
 
 - **注册换发凭证**：`POST /api/register` 核销一次性令牌，换发心跳令牌 `amh_…`（已有本实例的 config 则整步跳过）
-- **能力画像采集**：执行器按 `openclaw` → `hermes` 顺序自动探测（多 CLI 共存时可用 `AM_EXECUTOR` 显式指定），版本取 `<executor> --version`；合并 Agent 自报的 `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`，由 python3 组装成 meta JSON 随注册上报；升级重跑时借一次带 meta 的心跳刷新画像（每分钟的常规心跳不携带，避免无谓流量）。全程可选，不填不影响接入
+- **能力画像采集**：执行器按 `openclaw` → `hermes` 顺序自动探测（多 CLI 共存时可用 `AM_EXECUTOR` 显式指定），版本取 `<executor> --version`；合并 Agent 自报的 `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`，由 python3 组装成 meta JSON 随注册上报，并落盘实例目录的 `meta.json`——此后**每次心跳自动携带**；Agent 模型/技能变化时直接改写该文件（合法 JSON 对象、≤2KB），一分钟内自动同步，无需重跑脚本。全程可选，不填不影响接入
 - **落盘**：实例目录的 `config`（600）写入 `AM_URL` / `AM_HB_TOKEN` / `AM_INSTANCE` / `AM_RUN_TASK`。默认实例目录是 `~/.agent-matrix`；指定 `AM_INSTANCE=<名字>` 后用 `~/.agent-matrix-<名字>`——同一台机器可接入多个身份，配置、会话存档、任务文件、定时任务按实例彻底隔离
 - **执行器命令**：OpenClaw 走生成的 `openclaw-round.sh` 包装——运行时会 probe `openclaw agent --help` 的参数面自动适配，不要求固定版本号：有 `--session-key`（新版）时每轮 `openclaw agent --session-key "matrix-$2" --message …` 直接按键路由；有 `--session-id` 无 `--session-key` 的版本（如 2026.4.x）自动降级为首轮 `--to "matrix-$2" --json` 派生会话并解析 sessionId 存档，后续轮 `--session-id` 续上，会话失效自动重派；只有 `--to` 无 `--session-id` 的版本每轮 `--to` 同 dest 派生同会话（尽力而为，无续写保证）；三者均无则报错退出，需升级。Hermes 走生成的 `hermes-round.sh` 包装——首轮 `hermes chat -q --quiet` 新建会话，从输出解析精确 session_id 存档（`~/.agent-matrix/sessions/<任务ID>`，同时 rename 为 `matrix-<任务ID>` 便于在 `hermes sessions` 里辨认），后续轮 `--resume <sid>` 续上；Hermes 没有像 OpenClaw 那样的 probe 降级机制，**必须支持 `--resume`** 才能正常续接多轮会话上下文，否则从第二轮起每轮退化为独立新会话。也可用 `AM_RUN_TASK='…'` 环境变量完全自定义（`$1`=任务内容、`$2`=任务ID tsk_…）
-- **写两个脚本**：`heartbeat.sh`（心跳）与 `task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）；脚本自定位所在实例目录，目录叫什么都能正确工作
-- **安装每分钟定时**：macOS → launchd 两个 plist（unload + load 幂等）；Linux → cron 合并两行或 systemd --user 两对 service+timer；单元名与 cron 清理都按实例后缀区分，互不影响；都不识别则打印手动安装说明（Windows 场景）
+- **写执行脚本**：`heartbeat.sh`（心跳：携带 `meta.json` 画像上报、接收服务端下发的轮询间隔并机械跟进、410 自卸载）、`task-runner.sh`（拉任务 → 执行 → 机械回写，目录锁防重入、窄 PATH 补全、结果截尾 30KB）、`install-scheduler.sh`（按给定间隔重装本实例定时任务）；脚本自定位所在实例目录，目录叫什么都能正确工作
+- **安装定时任务**：初始间隔 60s（可用 `AM_INTERVAL` 指定）；macOS → launchd 两个 plist（秒级 `StartInterval`）；Linux → cron 两行（分钟粒度，亚分钟向下取整）或 systemd --user 两对 service+timer（秒级）；单元名与 cron 清理都按实例后缀区分，互不影响；都不识别则打印手动安装说明（Windows 场景）。之后每次心跳响应携带服务端「设置」里的全局 `poll_interval`，与本机不一致即自动重装跟进，**调频率不需要重新接入、不需要给 Agent 发任何提示词**
 - **自检**：真实跑一次心跳、一次任务拉取，并用 `env -i` 窄环境模拟调度器跑 runner，最后输出 `AM_SETUP_DONE name=… sched=…`
 
 ---
@@ -362,8 +363,8 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | `GET` | `/setup.sh` | 无 | 下载一键接入/升级脚本（不含密钥，`{{BASE_URL}}` 已注入） |
-| `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌（可携带能力画像 `meta` JSON：persona/executor/版本/模型/技能） |
-| `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（可选携带 `meta` JSON；升级重跑 setup.sh 时借此刷新能力画像，常规心跳不带） |
+| `POST` | `/api/register` | 一次性注册令牌 | Agent 注册，换发心跳令牌（可携带能力画像 `meta` JSON：persona/executor/版本/模型/技能）。登记名称全局唯一，重名返回 409 且不核销令牌，换 `AM_NAME` 重试即可 |
+| `POST` | `/api/heartbeat` | `Bearer amh_…` | 心跳上报（携带实例目录 `meta.json` 的能力画像，写坏则自动降级为不带、心跳不断）；响应下发全局 `poll_interval`，Agent 侧据此机械调整本机定时任务 |
 | `GET` | `/api/agent/tasks` | `Bearer amh_…` | Agent 拉取自己的待执行任务（事务内原子置 delivered，不重复投递），响应含附件清单 |
 | `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | 回写执行结果（`status`: done/failed + `result` ≤32KB，仅 delivered 状态可写一次） |
 | `GET` | `/api/agent/attachments/{id}` | `Bearer amh_…` | 下载输入件（仅限自己被指派过的任务） |

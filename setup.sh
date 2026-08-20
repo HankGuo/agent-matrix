@@ -7,9 +7,10 @@
 #   指定执行器：AM_EXECUTOR=hermes sh setup.sh   （多 CLI 共存时显式选定，画像与实际执行通道始终一致）
 #   单机多身份：AM_INSTANCE=writer AM_NAME="…" sh setup.sh   （实例目录 ~/.agent-matrix-writer，完全隔离）
 #   自定义命令：AM_RUN_TASK='openclaw agent --session-key "matrix-$2" --message "$1"' sh setup.sh
+#   初始轮询间隔：AM_INTERVAL=30 sh setup.sh   （秒；装完后随服务端「设置」里的全局间隔自动跟进）
 #
 # 自动完成：注册换发凭证 → 落盘 <实例目录> → 安装心跳与任务执行器 →
-#           安装每分钟定时任务（cron / launchd / systemd user timer）→ 自检。
+#           安装定时任务（cron / launchd / systemd user timer，间隔随服务端设置自动跟进）→ 自检。
 set -u
 
 PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
@@ -38,7 +39,7 @@ case "$AM_URL" in *"{{"*) die "AM_URL 未设置：请通过 GET /setup.sh 下载
 command -v curl >/dev/null 2>&1 || die "需要 curl"
 mkdir -p "$DIR" && chmod 700 "$DIR"
 
-# ---- 1) 能力画像采集（随注册上报、随升级刷新，全部可选） ----
+# ---- 1) 能力画像采集（随注册上报、落盘 meta.json 随每次心跳刷新，全部可选） ----
 # 执行器与版本自动探测（多 CLI 共存时用 AM_EXECUTOR 显式指定）；人设/模型/技能由 Agent 通过
 # AM_PERSONA / AM_MODEL / AM_SKILLS 提供。JSON 交给 python3 组装，避免 shell 拼串的引号注入；
 # 无 python3 则跳过画像（不影响接入）。
@@ -80,11 +81,12 @@ else
   if [ -n "$META" ] && [ "$META" != "{}" ]; then
     META_FIELD=$(python3 -c 'import json,sys; print(",\"meta\":" + json.dumps(sys.argv[1], ensure_ascii=False))' "$META")
   fi
-  resp=$(curl -fsS -m 20 -X POST "$AM_URL/api/register" -H 'Content-Type: application/json' \
+  # 不用 -f：HTTP 错误时保留响应体并原样透出，便于区分 401（令牌失效）与 409（名称占用）
+  resp=$(curl -sS -m 20 -X POST "$AM_URL/api/register" -H 'Content-Type: application/json' \
     -d "{\"token\":\"$AM_TOKEN\",\"name\":\"$AM_NAME\",\"hostname\":\"$(hostname)\",\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"$META_FIELD}") \
-    || die "注册失败（令牌无效、已用或过期）"
+    || die "注册请求失败（网络错误）"
   HB=$(printf '%s' "$resp" | sed -n 's/.*"heartbeat_token":"\([^"]*\)".*/\1/p')
-  [ -n "$HB" ] || die "注册响应缺少 heartbeat_token"
+  [ -n "$HB" ] || die "注册被拒：$resp（401=令牌失效，向我索要新令牌；409=名称已占用，换 AM_NAME 重跑，令牌仍有效）"
   AM_HB_TOKEN="$HB"
   say "== 注册成功"
 fi
@@ -107,9 +109,18 @@ printf 'AM_URL=%s\nAM_HB_TOKEN=%s\nAM_INSTANCE=%s\nAM_RUN_TASK=%s\n' "$AM_URL" "
 chmod 600 "$CFG"
 say "== 执行器: $RUN_TASK"
 
+# 能力画像本地存档：每次心跳自动携带上报；Agent 模型/技能变化时直接改写此文件即可，
+# 无需重跑本脚本。重跑 setup.sh 会用本次采集的画像覆盖它（与升级刷新语义一致）。
+[ -n "$META" ] || META="{}"
+printf '%s\n' "$META" > "$DIR/meta.json"
+chmod 600 "$DIR/meta.json"
+
 # ---- 4) 心跳脚本 ----
 # 临时文件 + mv 原子替换：本脚本可能被「自升级任务」触发，此时 heartbeat.sh / task-runner.sh
 # 可能正在运行；直接 cat > 截断改写会让运行中的 sh 实例读到错乱内容，mv 换 inode 则安全。
+# 每次心跳携带 meta.json（能力画像本地存档，Agent 可自行改写，一分钟内自动上报）；
+# 服务端响应里下发全局 poll_interval，与本地记录不一致即调用 install-scheduler.sh
+# 机械重装本实例定时任务，全程无需 Agent 理解任何提示词。
 # 心跳收到 410（已下线）时自卸载：runner 忙则本轮推迟；卸定时任务、删本实例目录。
 # 脚本一律自定位所在目录，实例目录叫什么都能正确工作（AM_INSTANCE 从 config 读出）。
 cat > "$DIR/.heartbeat.sh.tmp" <<'EOF'
@@ -117,9 +128,38 @@ cat > "$DIR/.heartbeat.sh.tmp" <<'EOF'
 DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$DIR/config"
 SFX="${AM_INSTANCE:+-$AM_INSTANCE}"
-code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$AM_URL/api/heartbeat" \
-  -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
-[ "$code" = "410" ] || exit 0
+
+# 能力画像随心跳上报：meta.json 缺失或非法（非 JSON 对象 / 超 2KB）则本轮不携带，
+# 保证画像写坏时心跳本身不受影响（否则服务端 400 会让 Agent 假性离线）。
+MBODY=""
+if [ -s "$DIR/meta.json" ] && command -v python3 >/dev/null 2>&1; then
+  MBODY=$(python3 -c 'import json,sys
+m = json.loads(open(sys.argv[1]).read())
+if not isinstance(m, dict): raise ValueError("not a dict")
+s = json.dumps(m, ensure_ascii=False)
+if len(s) > 2000: raise ValueError("too large")
+print(json.dumps({"meta": s}))' "$DIR/meta.json" 2>/dev/null)
+fi
+if [ -n "$MBODY" ]; then
+  resp=$(curl -sS -m 15 -w '\n%{http_code}' -X POST "$AM_URL/api/heartbeat" \
+    -H "Authorization: Bearer $AM_HB_TOKEN" -H 'Content-Type: application/json' \
+    -d "$MBODY" 2>/dev/null) || exit 0
+else
+  resp=$(curl -sS -m 15 -w '\n%{http_code}' -X POST "$AM_URL/api/heartbeat" \
+    -H "Authorization: Bearer $AM_HB_TOKEN" 2>/dev/null) || exit 0
+fi
+code=$(printf '%s' "$resp" | sed -n '$p')
+
+if [ "$code" != "410" ]; then
+  [ "$code" = "200" ] || exit 0
+  # 轮询间隔跟进：服务端值与本地记录不同则重装本实例定时任务（老服务端无此字段则跳过）
+  want=$(printf '%s' "$resp" | sed -n 's/.*"poll_interval":\([0-9][0-9]*\).*/\1/p' | head -1)
+  [ -n "$want" ] || exit 0
+  [ "$want" = "$(cat "$DIR/poll-interval" 2>/dev/null)" ] && exit 0
+  printf '%s\n' "$want" > "$DIR/poll-interval"
+  sh "$DIR/install-scheduler.sh" "$want" >/dev/null 2>&1
+  exit 0
+fi
 
 # 已被平台下线：runner 正在执行任务则本轮跳过，下一分钟心跳仍会 410，届时再卸
 mkdir "$DIR/runner.lock" 2>/dev/null || exit 0
@@ -378,19 +418,31 @@ exit 99
 EOF
 mv -f "$DIR/.openclaw-round.sh.tmp" "$DIR/openclaw-round.sh"
 
-chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh" "$DIR/openclaw-round.sh"
+chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh" "$DIR/openclaw-round.sh" "$DIR/install-scheduler.sh"
 command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 整体依赖它"
 
-# ---- 6) 每分钟定时任务（heartbeat.sh 与 task-runner.sh 各一条） ----
-# 单元名/cron 行都以本实例为单位：SFX 后缀区分 launchd 与 systemd 单元名；
-# cron 清理按 "$DIR/" 前缀精确匹配，绝不动其它实例的行。
-SCHED="manual"
+# ---- 6) 定时任务安装器（生成到实例目录，setup 与心跳间隔跟进共用） ----
+# install-scheduler.sh <间隔秒>：launchd / systemd 支持秒级；cron 以分钟为粒度
+# 向下取整（偏快不偏慢）。单元名/cron 行都以本实例为单位：SFX 后缀区分 launchd 与
+# systemd 单元名；cron 清理按 "$DIR/" 前缀精确匹配，绝不动其它实例的行。
+# launchd 的 unload/load 放在脱离当前进程的延迟子 shell 里：从 heartbeat.sh 同步调用时
+# unload 会 SIGTERM 当前心跳进程本身，同步执行会让 load 永远轮不到。
+cat > "$DIR/.install-scheduler.sh.tmp" <<'EOSCHED'
+#!/bin/sh
+# install-scheduler.sh <间隔秒>：安装/更新本实例的定时任务（由 Agent Matrix setup.sh 生成）
+DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$DIR/config"
+SECS="${1:-60}"
+case "$SECS" in *[!0-9]*|'') SECS=60 ;; esac
+[ "$SECS" -lt 10 ] && SECS=10
 SFX="${AM_INSTANCE:+-$AM_INSTANCE}"
+SCHED="manual"
+
 if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   mkdir -p "$HOME/Library/LaunchAgents"
   for unit in heartbeat task-runner; do
     plist="$HOME/Library/LaunchAgents/com.agent-matrix$SFX.$unit.plist"
-    cat > "$plist" <<EOF
+    cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -398,49 +450,66 @@ if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   <key>Label</key><string>com.agent-matrix$SFX.$unit</string>
   <key>ProgramArguments</key>
   <array><string>$DIR/$unit.sh</string></array>
-  <key>StartInterval</key><integer>60</integer>
+  <key>StartInterval</key><integer>$SECS</integer>
   <key>RunAtLoad</key><true/>
 </dict>
 </plist>
-EOF
-    launchctl unload "$plist" 2>/dev/null || true
-    launchctl load "$plist" 2>/dev/null || true
+PLIST
   done
+  ( sleep 1
+    for unit in heartbeat task-runner; do
+      plist="$HOME/Library/LaunchAgents/com.agent-matrix$SFX.$unit.plist"
+      launchctl unload "$plist" 2>/dev/null
+      launchctl load "$plist" 2>/dev/null
+    done ) </dev/null >/dev/null 2>&1 &
   SCHED="launchd"
 elif command -v crontab >/dev/null 2>&1; then
+  MINS=$((SECS / 60))
+  if [ "$MINS" -le 1 ]; then EXP='* * * * *'; else EXP="*/$MINS * * * *"; fi
   ( crontab -l 2>/dev/null | grep -v "$DIR/"
-    printf '* * * * * %s\n* * * * * %s\n' "$DIR/heartbeat.sh" "$DIR/task-runner.sh" ) | crontab -
+    printf '%s %s\n%s %s\n' "$EXP" "$DIR/heartbeat.sh" "$EXP" "$DIR/task-runner.sh" ) | crontab -
   SCHED="cron"
 elif command -v systemctl >/dev/null 2>&1; then
   udir="$HOME/.config/systemd/user"
   mkdir -p "$udir"
   for unit in heartbeat task-runner; do
-    cat > "$udir/agent-matrix$SFX-$unit.service" <<EOF
+    cat > "$udir/agent-matrix$SFX-$unit.service" <<SVC
 [Service]
 Type=oneshot
 ExecStart=$DIR/$unit.sh
-EOF
-    cat > "$udir/agent-matrix$SFX-$unit.timer" <<EOF
+SVC
+    cat > "$udir/agent-matrix$SFX-$unit.timer" <<TMR
 [Timer]
-OnBootSec=60
-OnUnitActiveSec=60
+OnBootSec=$SECS
+OnUnitActiveSec=${SECS}s
 [Install]
 WantedBy=timers.target
-EOF
+TMR
   done
   systemctl --user daemon-reload 2>/dev/null \
     && systemctl --user enable --now "agent-matrix$SFX-heartbeat.timer" "agent-matrix$SFX-task-runner.timer" 2>/dev/null \
-    && SCHED="systemd" || say "== 警告: systemd --user 操作失败，请手动 enable 两个 timer"
+    && SCHED="systemd" || echo "install-scheduler: systemd --user 操作失败，请手动 enable 两个 timer" >&2
 fi
-[ "$SCHED" = "manual" ] && say "== 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每分钟触发"
-say "== 定时任务: ${SCHED}（每分钟 × 2）"
+if [ "$SCHED" = "manual" ]; then
+  echo "install-scheduler: 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每 $SECS 秒触发" >&2
+fi
+echo "$SCHED"
+EOSCHED
+mv -f "$DIR/.install-scheduler.sh.tmp" "$DIR/install-scheduler.sh"
 
-# ---- 7) 自检 ----
+# ---- 7) 安装定时任务：初始间隔取 AM_INTERVAL（默认 60s），随后心跳自动跟进服务端全局设置 ----
+SECS="${AM_INTERVAL:-60}"
+printf '%s\n' "$SECS" > "$DIR/poll-interval"
+SCHED=$(sh "$DIR/install-scheduler.sh" "$SECS")
+[ "$SCHED" = "manual" ] && say "== 未识别的调度环境（Windows 或其它）：请手动为 heartbeat.sh 与 task-runner.sh 安装每 $SECS 秒触发"
+say "== 定时任务: ${SCHED}（每 ${SECS} 秒 × 2，之后随服务端全局设置自动调整）"
+
+# ---- 8) 自检 ----
 say "== 自检"
 curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" >/dev/null 2>&1 \
   && say "  心跳: ok" || say "  心跳: FAIL"
-# 能力画像刷新：注册时上报过一次；升级重跑（跳过注册）时借带 meta 的心跳更新一次。
-# 每分钟常规心跳不携带 meta，避免无谓流量。
+# 能力画像：注册时已上报一次，此后每次心跳自动携带 meta.json（见 heartbeat.sh）。
+# 这里再显式带 meta POST 一次，作为即时自检反馈。
 if [ -n "$META" ] && [ "$META" != "{}" ]; then
   MBODY=$(python3 -c 'import json,sys; print(json.dumps({"meta": sys.argv[1]}, ensure_ascii=False))' "$META")
   curl -fsS -m 15 -X POST "$AM_URL/api/heartbeat" -H "Authorization: Bearer $AM_HB_TOKEN" \

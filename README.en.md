@@ -75,9 +75,9 @@ flowchart LR
     end
 
     B -->|"HTTPS admin"| S
-    G1 -->|"POST /api/heartbeat (every minute)"| S
-    G2 -->|"POST /api/heartbeat (every minute)"| S
-    G3 -->|"POST /api/heartbeat (every minute)"| S
+    G1 -->|"POST /api/heartbeat (adjustable, default every minute)"| S
+    G2 -->|"POST /api/heartbeat (adjustable, default every minute)"| S
+    G3 -->|"POST /api/heartbeat (adjustable, default every minute)"| S
     G1 -.->|"GET /api/agent/tasks pull task<br/>POST …/result write back"| S
     G1 -.->|"GET /setup.sh (install/upgrade script)"| S
     B -.->|"① copy onboarding prompt (one-time token)"| P[" "]
@@ -115,11 +115,11 @@ sequenceDiagram
     A->>G: paste the prompt (out-of-band: IM / SSH / console)
     G->>S: GET /setup.sh (idempotent installer, no secrets in it)
     G->>S: POST /api/register (consume one-time token)
-    S-->>G: agent_id + heartbeat token amh_… + suggested interval 60s
+    S-->>G: agent_id + heartbeat token amh_… + suggested interval (default 60s, globally adjustable in Settings)
     G->>G: setup.sh persists config & both scripts, installs scheduler, self-checks
-    loop every minute
-        G->>S: POST /api/heartbeat (Bearer amh_…)
-        S-->>G: {"ok": true, "server_time": …}
+    loop every poll cycle (default every minute)
+        G->>S: POST /api/heartbeat (Bearer amh_…, carrying the meta.json capability profile)
+        S-->>G: {"ok": true, "server_time": …, "poll_interval": 60}
     end
     A->>S: GET /api/agents (WebUI polls every 15s)
     S-->>A: online status (last heartbeat ≤ 3 min ⇒ online)
@@ -209,7 +209,7 @@ WantedBy=multi-user.target
 
 ## 📬 Task Dispatch
 
-The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents, optionally with up to 10 attachments (≤100MB each, each with its own caption). On each agent machine, `task-runner.sh` pulls tasks every minute, **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
+The admin writes a task on the "任务" (Tasks) page and @-mentions one or more enrolled agents, optionally with up to 10 attachments (≤100MB each, each with its own caption). On each agent machine, `task-runner.sh` pulls tasks on the configured poll interval (default every minute, globally adjustable in Settings), **executes them through the agent's own one-shot CLI command** (auto-detected at setup in the order openclaw → hermes; customizable via `AM_RUN_TASK` in `~/.agent-matrix/config`), and **mechanically writes the result back** based on the exit code — nothing depends on the agent remembering conventions. Everything is an outbound request from the agent — NAT- and firewall-friendly by construction, no callback networking to solve.
 
 > ⚠️ **Executor version requirements**:
 > - **OpenClaw**: `setup.sh` probes `openclaw agent --help` at runtime and adapts to whatever flags are available — no fixed version number required. Four tiers: has `--session-key` (newest, best experience, direct key-based session routing) → has `--session-id` (first round uses `--to` + `--json` to derive session, subsequent rounds `--session-id` resume; on stale session the archive is deleted and it falls back to re-deriving) → has `--to` but no `--session-id` (each round uses `--to`, same destination derives same session, best effort, no resume guarantee) → missing all three (error exit 99, upgrade required). **Old OpenClaw builds that have `--to` but lack `--session-id` are no longer incorrectly blocked** — they now fall through to the `--to` path gracefully.
@@ -270,7 +270,7 @@ sequenceDiagram
     participant G as Agent (autonomous)
 
     A->>S: POST /api/tasks (title + content + attachments + @ 1~20 agents)
-    loop every minute (task-runner.sh, directory lock)
+    loop every poll cycle (default every minute; task-runner.sh, directory lock)
         G->>S: GET /api/agent/tasks (Bearer amh_…)
         S-->>G: its tasks (atomically marked delivered) + attachment manifest
         G->>S: GET /api/agent/attachments/{id} (download inputs to local disk)
@@ -308,8 +308,8 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
     AM_SKILLS='你的技能，逗号分隔、每项一个词，如 code,web-search,review' \
     sh /tmp/am-setup.sh
    登记边界（必须遵守）：只写公开能力描述；不要复制系统提示词或 SOUL 文件全文；不要包含任何密钥、token、内网地址。不确定的项直接删掉对应变量再执行，不要编造。
-   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装每分钟定时任务（cron / launchd / systemd，自动识别）→ 自检。
-3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
+   脚本会自动完成：注册换发凭证 → 落盘 ~/.agent-matrix/ → 安装心跳与任务执行器 → 安装定时任务（cron / launchd / systemd，自动识别）→ 自检。
+3. 失败处理：注册 401 说明令牌已用或过期，直接向我索要新令牌，不要重试；409 说明登记名称已被占用，把 AM_NAME 换成一个未占用的名称重跑即可（令牌不受影响）；其他失败重试一次，仍失败则带原始报错向我汇报，不要静默跳过。
 
 ## 汇报
 把脚本末尾的自检输出原样汇报给我：是否注册成功、执行器用的哪条命令、定时任务类型（sched=）、登记上的资料（executor/版本/模型/技能）、各项自检是否 ok。
@@ -318,6 +318,7 @@ This is what the WebUI generates (verbatim real output, Chinese by design — it
 - 任务执行器官方支持 OpenClaw / Hermes Agent，按 openclaw → hermes 顺序自动探测。**这台机器同时装了多个执行器 CLI 时**，在命令前加 AM_EXECUTOR 显式指定你要用哪个（如 AM_EXECUTOR=hermes），脚本会让上报的画像和实际执行通道保持一致。要完全自定义就设 AM_RUN_TASK='你的命令（$1=任务内容 $2=任务ID tsk_…）'。之后想改命令，编辑实例目录 config 里的 AM_RUN_TASK 即可。
 - **同一台机器要接入多个互不影响的身份**时（例如同时以 openclaw 和 hermes 两个人格接入），每次接入加上不同的 AM_INSTANCE（如 AM_INSTANCE=hermes）：配置、会话存档、任务文件、定时任务会落在独立的实例目录（~/.agent-matrix-<实例名>），彻底隔离。不加则共用默认目录 ~/.agent-matrix/。
 - 调度环境未被自动识别时（如 Windows），脚本会打印手动安装说明，照做即可。
+- 你的能力资料（执行器/人设/模型/技能）保存在实例目录的 meta.json，每次心跳自动上报；之后模型或技能有变化时直接改写该文件（合法 JSON 对象、2KB 以内），下一次心跳即自动同步，无需重新接入。
 ```
 
 </details>
@@ -331,11 +332,11 @@ All static logic lives on the server (`GET /setup.sh`, no auth, no secrets); the
 `setup.sh` is idempotent — re-running it upgrades the agent to the latest runner:
 
 - **Register**: `POST /api/register` consumes the one-time token and issues the heartbeat token `amh_…` (skipped entirely when the instance's config already exists — naturally idempotent, re-running means upgrading)
-- **Collect the capability profile**: the executor is auto-detected in the order openclaw → hermes (with multiple CLIs installed, set `AM_EXECUTOR` explicitly — the reported profile always matches the actual execution channel), version from `<executor> --version`; merges the agent-reported `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`, and assembles the meta JSON with python3 — sent with registration; on upgrade re-runs, one meta-bearing heartbeat refreshes the profile (the per-minute regular heartbeat never carries it). All optional — skipping it doesn't block onboarding
+- **Collect the capability profile**: the executor is auto-detected in the order openclaw → hermes (with multiple CLIs installed, set `AM_EXECUTOR` explicitly — the reported profile always matches the actual execution channel), version from `<executor> --version`; merges the agent-reported `AM_PERSONA` / `AM_MODEL` / `AM_SKILLS`, assembles the meta JSON with python3 — sent with registration and persisted as `meta.json` in the instance directory, which **every heartbeat then carries automatically**. When the agent's model/skills change later, it just rewrites that file (valid JSON object, ≤2KB) and the next heartbeat syncs it — no re-onboarding. All optional — skipping it doesn't block onboarding
 - **Persist**: the instance directory's `config` (mode 600) with `AM_URL` / `AM_HB_TOKEN` / `AM_INSTANCE` / `AM_RUN_TASK`. The default instance directory is `~/.agent-matrix`; with `AM_INSTANCE=<name>` it becomes `~/.agent-matrix-<name>` — multiple identities can coexist on one machine with fully isolated configs, session archives, task files, and schedulers
 - **Executor command**: OpenClaw goes through the generated `openclaw-round.sh` wrapper — it probes `openclaw agent --help` at runtime and adapts to whatever flags are present, no fixed version required: with `--session-key` (newer builds) every round routes via `openclaw agent --session-key "matrix-$2" --message …`; with `--session-id` but no `--session-key` (older builds, e.g. 2026.4.x) round one derives the session with `--to "matrix-$2" --json`, archives the parsed sessionId, and later rounds continue via `--session-id` (stale session → archive deleted → re-derive); with `--to` but no `--session-id` each round uses `--to` (same destination derives the same session, best effort, no resume guarantee); missing all three (no `--session-key`, `--session-id`, or `--to`) exits with error 99 — upgrade required. Hermes goes through the generated `hermes-round.sh` wrapper — round one runs `hermes chat -q --quiet` to start a session and parses the exact session_id from its output, later rounds `--resume <sid>`; unlike OpenClaw there is no probe + graceful fallback — **Hermes must support `--resume`** for multi-round context continuity, otherwise every round after the first becomes an independent new session; or set `AM_RUN_TASK='…'` to fully customize (`$1`=task content, `$2`=task ID tsk_…)
-- **Write two scripts**: `heartbeat.sh` and `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail); the scripts self-locate their instance directory, so any directory name works
-- **Install the per-minute scheduler**: macOS → two launchd plists (unload + load, idempotent); Linux → two merged cron lines or two systemd --user service+timer pairs; unit names and cron cleanup are scoped per instance suffix and never touch other instances; otherwise prints manual instructions (e.g. Windows)
+- **Write the executor scripts**: `heartbeat.sh` (carries the `meta.json` profile on every beat, follows the server-pushed poll interval by mechanically reinstalling its own scheduler, self-uninstalls on 410), `task-runner.sh` (pull → execute → mechanical write-back, with a directory lock, PATH augmentation, and 30KB result tail), and `install-scheduler.sh` (reinstalls this instance's scheduler for a given interval); the scripts self-locate their instance directory, so any directory name works
+- **Install the scheduler**: initial interval 60s (overridable via `AM_INTERVAL`); macOS → two launchd plists (second-level `StartInterval`); Linux → two cron lines (minute granularity, sub-minute values round down) or two systemd --user service+timer pairs (second-level); unit names and cron cleanup are scoped per instance suffix and never touch other instances; otherwise prints manual instructions (e.g. Windows). Every heartbeat response then carries the global `poll_interval` from Settings, and any instance seeing a different value reinstalls its own scheduler automatically — **changing the frequency needs neither re-onboarding nor any prompt to the agent**
 - **Self-check**: runs a real heartbeat, a real task pull, and the runner under an `env -i` narrow environment, then prints `AM_SETUP_DONE name=… sched=…`
 
 ---
@@ -362,8 +363,8 @@ All state lives in the single SQLite file at `AGENT_MATRIX_DB`; a restart never 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/setup.sh` | none | Download the onboarding/upgrade script (no secrets; `{{BASE_URL}}` pre-filled) |
-| `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token (optionally carries the capability-profile `meta` JSON: persona/executor/version/model/skills) |
-| `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (optional `meta` JSON; used by setup.sh upgrade re-runs to refresh the capability profile — the regular per-minute heartbeat never carries it) |
+| `POST` | `/api/register` | one-time enrollment token | Register agent, issue heartbeat token (optionally carries the capability-profile `meta` JSON: persona/executor/version/model/skills). Names are globally unique: a duplicate returns 409 without consuming the token — retry with a different `AM_NAME` |
+| `POST` | `/api/heartbeat` | `Bearer amh_…` | Heartbeat (carries the capability profile from the instance's `meta.json`; a broken file degrades to a plain beat so heartbeats never stop); the response pushes the global `poll_interval`, which the agent uses to mechanically adjust its own scheduler |
 | `GET` | `/api/agent/tasks` | `Bearer amh_…` | Pull own pending tasks (atomically marked delivered, never twice); response includes the attachment manifest |
 | `POST` | `/api/agent/tasks/{id}/result` | `Bearer amh_…` | Write back result (`status`: done/failed + `result` ≤32KB, delivered-only, single-shot) |
 | `GET` | `/api/agent/attachments/{id}` | `Bearer amh_…` | Download an input attachment (only for tasks assigned to you) |

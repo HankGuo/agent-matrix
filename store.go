@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -160,6 +161,23 @@ func (s *store) setSetting(key, value string) error {
 	return err
 }
 
+// defaultPollInterval 是未配置时的默认轮询间隔（秒）。
+const defaultPollInterval = 60
+
+// pollInterval 返回全局轮询间隔（秒），随心跳响应下发，各实例据此机械调整
+// 本机定时任务。缺失或非法值回退默认。
+func (s *store) pollInterval() int {
+	v, err := s.getSetting("poll_interval")
+	if err != nil {
+		return defaultPollInterval
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 10 || n > 3600 {
+		return defaultPollInterval
+	}
+	return n
+}
+
 // sessionSecret 返回持久的会话签名密钥，不存在则生成。
 func (s *store) sessionSecret() (string, error) {
 	v, err := s.getSetting("session_secret")
@@ -205,7 +223,18 @@ func (s *store) consumeEnrollment(token string) (string, error) {
 	return label, err
 }
 
+var errNameTaken = errors.New("登记名称已被占用")
+
+// agentNameExists 报告是否已存在同名 Agent。名称全局唯一，注册前置校验，
+// 避免同名冲突时白白核销一次性令牌。
+func (s *store) agentNameExists(name string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE name = ?`, name).Scan(&n)
+	return n > 0, err
+}
+
 // createAgent 创建 Agent 记录，返回记录与明文心跳令牌（仅此一次可见）。
+// 名称全局唯一：同事务内先查后插，重名返回 errNameTaken。
 func (s *store) createAgent(name, hostname, osName, arch, ip, meta string) (*Agent, string, error) {
 	now := time.Now().Unix()
 	a := &Agent{
@@ -220,15 +249,26 @@ func (s *store) createAgent(name, hostname, osName, arch, ip, meta string) (*Age
 		LastSeen:  now,
 	}
 	raw := "amh_" + randToken(24)
-	_, err := s.db.Exec(
-		`INSERT INTO agents (id, name, hostname, os, arch, ip, meta, token_hash, created_at, last_seen)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.Name, a.Hostname, a.OS, a.Arch, a.IP, a.Meta, hashToken(raw), a.CreatedAt, a.LastSeen,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, "", err
 	}
-	return a, raw, nil
+	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM agents WHERE name = ?`, name).Scan(&n); err != nil {
+		return nil, "", err
+	}
+	if n > 0 {
+		return nil, "", errNameTaken
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO agents (id, name, hostname, os, arch, ip, meta, token_hash, created_at, last_seen)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.Name, a.Hostname, a.OS, a.Arch, a.IP, a.Meta, hashToken(raw), a.CreatedAt, a.LastSeen,
+	); err != nil {
+		return nil, "", err
+	}
+	return a, raw, tx.Commit()
 }
 
 // agentByToken 按心跳令牌（哈希比对）查找 Agent。
