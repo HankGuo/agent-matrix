@@ -428,8 +428,8 @@ Versus IM-group management (WeCom / Lark / Telegram gateways): IM is the **conve
 
 ---
 
-## 📢 Follow on WeChat
+## 📢 WeChat (no promises)
 
-Welcome to follow the WeChat public account **「算力白肉」** for more tech articles and project updates:
+The author also keeps a WeChat account, **「算力白肉」** — a pun on a Sichuan pork dish and "compute power". It is not a serious media venture: no posting schedule, no content strategy, and no guarantee the next post is even about tech. Project news may show up there eventually, when the mood strikes. Scan if curious:
 
 <img src="docs/wechat-qr.jpg" alt="WeChat public account: 算力白肉" width="200">
