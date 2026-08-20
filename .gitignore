@@ -4,6 +4,8 @@ attachments/
 *.db-wal
 agent-matrix
 agent-matrix-dev
+.DS_Store
+宣传/
 
 # 本地 AI 助手上下文，不入库
 AGENTS.md
