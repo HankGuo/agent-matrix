@@ -447,18 +447,67 @@ input:focus, textarea:focus {
   gap: 18px;
 }
 .acard {
+  /* 每个 Agent 一个身份色：JS 按 ID 哈希注入 --agent-hue，三色由此派生 */
+  --agent-ink: hsl(var(--agent-hue, 174) 42% 30%);
+  --agent-soft: hsl(var(--agent-hue, 174) 48% 93%);
+  --agent-line: hsl(var(--agent-hue, 174) 34% 79%);
   background: var(--surface);
   border: 1px solid var(--line);
+  border-top: 2px solid var(--agent-line);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-sm);
   padding: 20px 20px 14px;
   display: flex;
   flex-direction: column;
   gap: 11px;
-  transition: box-shadow 0.15s, border-color 0.15s;
+  transition: box-shadow 0.15s, border-color 0.15s, transform 0.15s var(--ease), opacity 0.15s;
 }
-.acard.off { opacity: 0.6; }
+/* 离线卡片降级：身份色中和为灰，内容区调暗——但底部操作区保持全亮，
+   下线僵尸 Agent 正是此刻最该好点的按钮 */
+.acard.off {
+  --agent-ink: #6b7280;
+  --agent-soft: #eff1f4;
+  --agent-line: var(--line-strong);
+}
+.acard.off .acard-title,
+.acard.off .acard-id,
+.acard.off .acard-persona,
+.acard.off .acard-meta,
+.acard.off .acard-skills,
+.acard.off .acard-task {
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
 .acard-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.acard-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.acard-ava {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-ctl);
+  background: var(--agent-soft);
+  color: var(--agent-ink);
+  border: 1px solid var(--agent-line);
+  font-weight: 700;
+  font-size: 14px;
+}
+.acard-side { display: flex; align-items: center; gap: 6px; flex: none; }
+.acard-exec {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--agent-ink);
+  background: var(--agent-soft);
+  border: 1px solid var(--agent-line);
+  padding: 3px 8px;
+  border-radius: var(--r-tag);
+  max-width: 172px; /* 容纳 "openclaw 2026.4.18" 级别的执行器+版本，不再腰斩版本号 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .acard-name {
   font-weight: 600;
   font-size: 16.5px;
@@ -520,7 +569,13 @@ input:focus, textarea:focus {
   flex-wrap: wrap;
   gap: 6px;
 }
-.acard-skills .chip { max-width: 140px; }
+/* 技能标签染 Agent 身份色（柔底 + 同色系文字），破掉清一色灰 */
+.acard-skills .chip {
+  max-width: 140px;
+  background: var(--agent-soft);
+  color: var(--agent-ink);
+  border-color: var(--agent-line);
+}
 .acard-task {
   border-top: 1px solid var(--line);
   padding-top: 11px;
@@ -542,7 +597,8 @@ input:focus, textarea:focus {
   justify-content: flex-end;
   margin-top: auto; /* 等高栅格中操作区一律沉底，内容少的卡片按钮不悬空 */
 }
-.acard-del { color: var(--danger); font-size: 13px; padding: 4px 10px; }
+.acard-del { font-size: 12.5px; padding: 5px 12px; }
+.acard-del:disabled { opacity: 0.55; cursor: default; }
 
 /* ---- 空状态 ---- */
 .empty {
@@ -879,7 +935,17 @@ input:focus, textarea:focus {
     box-shadow: var(--shadow-md);
     border-color: var(--line-strong);
   }
-  .acard:hover { box-shadow: var(--shadow-md); border-color: var(--line-strong); }
+  .acard:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+    border-color: var(--line-strong);
+  }
+  .acard.off:hover .acard-title,
+  .acard.off:hover .acard-id,
+  .acard.off:hover .acard-persona,
+  .acard.off:hover .acard-meta,
+  .acard.off:hover .acard-skills,
+  .acard.off:hover .acard-task { opacity: 0.88; }
   .pick:hover { border-color: rgba(15, 23, 42, 0.32); }
   ::-webkit-scrollbar-thumb:hover { background-color: rgba(15, 23, 42, 0.28); }
 }

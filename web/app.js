@@ -325,7 +325,9 @@ function renderAgents() {
 
   const grid = $("#agentGrid");
   grid.replaceChildren();
-  for (const a of agents) grid.append(agentCard(a));
+  // 在线在前、离线沉底（sort 稳定，组内保持服务端返回顺序）；离线卡片另有置灰降级
+  const sorted = [...agents].sort((x, y) => (y.online ? 1 : 0) - (x.online ? 1 : 0));
+  for (const a of sorted) grid.append(agentCard(a));
 }
 
 /* Agent 的最近一条任务（跨任务取最新一轮指派） */
@@ -341,9 +343,19 @@ function latestAssignmentOf(agentID) {
   return best;
 }
 
+/* Agent 身份色：按 ID 哈希在精选色相刻度里稳定取色——不用真随机，
+   否则每 15 秒刷新就跳色。饱和度/亮度由 CSS 统一约束，保证浅色纸面上的对比度 */
+const AGENT_HUES = [174, 196, 221, 247, 273, 303, 333, 14, 43, 132];
+function agentHue(id) {
+  let h = 5381;
+  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) >>> 0;
+  return AGENT_HUES[h % AGENT_HUES.length];
+}
+
 function agentCard(a) {
   const card = document.createElement("div");
   card.className = "acard" + (a.online ? "" : " off");
+  card.style.setProperty("--agent-hue", agentHue(a.id));
 
   // 能力画像（注册/升级时 Agent 自报的 meta JSON），容错解析
   let metaInfo = {};
@@ -351,10 +363,25 @@ function agentCard(a) {
 
   const head = document.createElement("div");
   head.className = "acard-head";
+  const title = document.createElement("div");
+  title.className = "acard-title";
+  const ava = document.createElement("span");
+  ava.className = "acard-ava";
+  ava.textContent = ([...String(a.name).trim()][0] || "?").toUpperCase();
   const nm = document.createElement("span");
   nm.className = "acard-name";
   nm.textContent = a.name;
   nm.title = a.name;
+  title.append(ava, nm);
+  const side = document.createElement("div");
+  side.className = "acard-side";
+  if (metaInfo.executor) {
+    const ex = document.createElement("span");
+    ex.className = "acard-exec mono";
+    ex.textContent = metaInfo.executor + (metaInfo.executor_version ? " " + metaInfo.executor_version : "");
+    ex.title = ex.textContent;
+    side.append(ex);
+  }
   const chip = document.createElement("span");
   chip.className = "status-chip";
   chip.append(a.online ? Object.assign(document.createElement("span"), { className: "dot on" })
@@ -362,7 +389,8 @@ function agentCard(a) {
   const st = document.createElement("span");
   st.textContent = a.online ? "在线" : "离线";
   chip.append(st);
-  head.append(nm, chip);
+  side.append(chip);
+  head.append(title, side);
 
   const idLine = document.createElement("div");
   idLine.className = "acard-id mono";
@@ -379,17 +407,15 @@ function agentCard(a) {
 
   const meta = document.createElement("dl");
   meta.className = "acard-meta";
-  const execText = metaInfo.executor
-    ? metaInfo.executor + (metaInfo.executor_version ? " " + metaInfo.executor_version : "")
-    : "-";
-  const fields = [
-    ["执行器", execText],
+  // 执行器已升格为头部标签；未自报画像的老数据才回退到字段区兜底
+  const fields = metaInfo.executor ? [] : [["执行器", "-"]];
+  fields.push(
     ["模型", metaInfo.model || "-"],
     ["主机", a.hostname || "-"],
     ["系统", a.os ? `${a.os}/${a.arch || "?"}` : "-"],
     ["IP", a.ip || "-"],
     ["最后心跳", relTime(a.last_seen)],
-  ];
+  );
   for (const [k, v] of fields) {
     const wrap = document.createElement("div");
     const dtx = document.createElement("dt");
@@ -446,9 +472,9 @@ function agentCard(a) {
   const foot = document.createElement("div");
   foot.className = "acard-foot";
   const del = document.createElement("button");
-  del.className = "btn text acard-del";
+  del.className = "btn danger-ghost acard-del";
   del.textContent = "下线";
-  del.addEventListener("click", () => removeAgent(a));
+  del.addEventListener("click", () => removeAgent(a, del));
   foot.append(del);
 
   card.append(head, idLine);
@@ -459,10 +485,27 @@ function agentCard(a) {
   return card;
 }
 
-async function removeAgent(a) {
+async function removeAgent(a, btn) {
   if (!confirm(`确定下线 Agent「${a.name}」(${a.id})？\n\n它会立即从列表消失，并在一分钟左右收到信号、自动卸载本机的定时任务与配置。`)) return;
-  const res = await api("/api/agents/" + encodeURIComponent(a.id), { method: "DELETE" });
-  if (res.ok) loadAgents();
+  btn.disabled = true;
+  btn.textContent = "下线中…";
+  let res = null;
+  try {
+    res = await api("/api/agents/" + encodeURIComponent(a.id), { method: "DELETE" });
+  } catch { /* res 保持 null，按网络错误处理 */ }
+  btn.disabled = false;
+  btn.textContent = "下线";
+  if (!res) {
+    toast("网络错误，请重试");
+    return;
+  }
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    toast(d.error || "下线失败，请重试");
+    return;
+  }
+  toast(`「${a.name}」已下线，其一分钟左右将自动卸载定时任务与配置`);
+  loadAgents();
 }
 
 /* ---- 面板开关 ---- */
