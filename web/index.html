@@ -3,31 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#faf7f2">
+<meta name="theme-color" content="#F7F9FC">
 <title>Agent Matrix · 任务控制台</title>
-<meta name="description" content="轻量 Agent 任务派发与监控中心：任务看板优先，同一任务可持续追加、按会话演进。">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23fbe9e2'/%3E%3Ccircle cx='10.5' cy='12' r='3.4' fill='%23c2410c'/%3E%3Ccircle cx='21.5' cy='12' r='3.4' fill='%23f0a02e'/%3E%3Ccircle cx='16' cy='21.5' r='3.4' fill='%231da97c'/%3E%3C/svg%3E">
+<meta name="description" content="轻量 Agent 任务派发与监控中心：任务流优先，同一任务可持续追加、按会话演进。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23F7F9FC'/%3E%3Crect x='2.5' y='2.5' width='27' height='27' fill='none' stroke='%231B2430' stroke-width='2'/%3E%3Ccircle cx='11' cy='11.5' r='3.2' fill='%231D6FE0'/%3E%3Ccircle cx='21' cy='11.5' r='3.2' fill='%23D4940F'/%3E%3Ccircle cx='16' cy='20.5' r='3.2' fill='%2316997B'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <a class="skip-link" href="#main">跳到主要内容</a>
 
 <div id="app" v-cloak>
-<header class="topbar">
-  <div class="brand">
+
+<!-- 报刊刊头：左 报名 + kicker，右 日期 + 统计 + Agent 摘要，下方 1px + 0.5px 双线 -->
+<header class="masthead">
+  <div class="mast-brand">
     <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="9" fill="#fbe9e2"/>
-      <circle cx="10.5" cy="12" r="3.4" fill="#c2410c"/>
-      <circle cx="21.5" cy="12" r="3.4" fill="#f0a02e"/>
-      <circle cx="16" cy="21.5" r="3.4" fill="#1da97c"/>
-      <path d="M13.3 14.6 14.9 18.6M19.1 14.6 17.4 18.6" stroke="#c2410c" stroke-width="1.1" opacity=".4"/>
+      <rect x="2.5" y="2.5" width="27" height="27" fill="none" stroke="#1B2430" stroke-width="2"/>
+      <circle cx="11" cy="11.5" r="3.2" fill="#1D6FE0"/>
+      <circle cx="21" cy="11.5" r="3.2" fill="#D4940F"/>
+      <circle cx="16" cy="20.5" r="3.2" fill="#16997B"/>
     </svg>
-    <span class="brand-name">Agent Matrix</span>
-    <span class="brand-sub mono">CONSOLE</span>
+    <div class="mast-word">
+      <span class="mast-kicker mono">PERSONAL AGENT OPERATIONS DESK</span>
+      <span class="mast-title">Agent Matrix</span>
+    </div>
   </div>
-  <div class="actions" v-show="screen === 'dash'">
-    <button class="btn text" type="button" @click="openSettings">设置</button>
-    <button class="btn text" type="button" @click="logout">退出</button>
+  <div class="mast-right" v-show="screen === 'dash'">
+    <p class="mast-date mono">{{ mastheadDate }}</p>
+    <p class="mast-line mono">{{ taskStat || '暂无在册任务' }}</p>
+    <p class="mast-line mono">{{ agentStat || '尚未接入 Agent' }}</p>
+    <div class="mast-actions">
+      <button class="btn text sm" type="button" @click="openSettings">设置</button>
+      <button class="btn text sm" type="button" @click="logout">退出</button>
+    </div>
   </div>
 </header>
 
@@ -74,99 +82,110 @@
   </section>
 
   <!-- 控制台 -->
-  <section v-else-if="screen === 'dash'">
-    <nav class="tabs" aria-label="视图切换">
-      <button class="tab" type="button" :class="{ active: view === 'tasks' }" @click="goView('tasks')">任务</button>
-      <button class="tab" type="button" :class="{ active: view === 'agents' }" @click="goView('agents')">Agent</button>
-    </nav>
+  <section v-else-if="screen === 'dash'" class="dash">
 
-    <!-- 任务看板（默认视图） -->
-    <div v-show="view === 'tasks'">
-      <header class="view-head">
-        <div>
-          <h1 class="display">任务</h1>
-          <p class="stats mono" v-if="taskStat">{{ taskStat }}</p>
-        </div>
-        <button class="btn primary" type="button" @click="openTaskNew"><span class="txt-full">新建任务</span><span class="txt-short">＋ 任务</span></button>
-      </header>
-
-      <!-- ≥768px：三列看板 -->
-      <div class="board" v-show="tasks.length">
-        <section class="board-col" aria-label="进行中">
-          <header class="col-head c-active"><span class="col-dot"></span><span class="col-label">进行中</span><span class="col-count mono">{{ counts.active }}</span></header>
-          <div class="col-body">
-            <task-card v-for="(t, i) in cols.active" :key="t.id" :t="t" :i="i" :now="nowTs"
-                       :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
-          </div>
-        </section>
-        <section class="board-col" aria-label="已完成">
-          <header class="col-head c-done"><span class="col-dot"></span><span class="col-label">已完成</span><span class="col-count mono">{{ counts.done }}</span></header>
-          <div class="col-body">
-            <task-card v-for="(t, i) in cols.done" :key="t.id" :t="t" :i="i" :now="nowTs"
-                       :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
-          </div>
-        </section>
-        <section class="board-col" aria-label="失败与取消">
-          <header class="col-head c-failed"><span class="col-dot"></span><span class="col-label">失败/取消</span><span class="col-count mono">{{ counts.failed }}</span></header>
-          <div class="col-body">
-            <task-card v-for="(t, i) in cols.failed" :key="t.id" :t="t" :i="i" :now="nowTs"
-                       :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
-          </div>
-        </section>
+    <!-- sticky 工具行（毛玻璃）：视图 tab ｜ 状态过滤 ｜ 同步状态 + 主按钮 -->
+    <div class="toolrow">
+      <div class="toolrow-scroll">
+        <nav class="vtabs" aria-label="视图切换">
+          <button class="vtab" type="button" :class="{ active: view === 'tasks' }" @click="goView('tasks')">任务</button>
+          <button class="vtab" type="button" :class="{ active: view === 'agents' }" @click="goView('agents')">Agent</button>
+        </nav>
+        <span class="toolrow-sep" aria-hidden="true" v-show="view === 'tasks'"></span>
+        <nav class="sfilters" aria-label="状态过滤" v-show="view === 'tasks'">
+          <button class="sfilter" type="button" :class="{ active: taskFilter === 'all' }" @click="taskFilter = 'all'">全部 <span class="mono">{{ tasks.length }}</span></button>
+          <button class="sfilter" type="button" :class="{ active: taskFilter === 'active' }" @click="taskFilter = 'active'">进行中 <span class="mono">{{ counts.active }}</span></button>
+          <button class="sfilter" type="button" :class="{ active: taskFilter === 'done' }" @click="taskFilter = 'done'">已完成 <span class="mono">{{ counts.done }}</span></button>
+          <button class="sfilter" type="button" :class="{ active: taskFilter === 'failed' }" @click="taskFilter = 'failed'">失败 <span class="mono">{{ counts.failed }}</span></button>
+        </nav>
       </div>
-
-      <!-- <768px：分段切换 + 单列 -->
-      <div class="seg" v-show="tasks.length" role="tablist" aria-label="按状态筛选">
-        <button class="seg-btn" type="button" role="tab" :class="{ active: seg === 'active' }" @click="seg = 'active'">进行中 <span class="mono">{{ counts.active }}</span></button>
-        <button class="seg-btn" type="button" role="tab" :class="{ active: seg === 'done' }" @click="seg = 'done'">已完成 <span class="mono">{{ counts.done }}</span></button>
-        <button class="seg-btn" type="button" role="tab" :class="{ active: seg === 'failed' }" @click="seg = 'failed'">失败/取消 <span class="mono">{{ counts.failed }}</span></button>
-      </div>
-      <div class="mcol" v-show="tasks.length">
-        <task-card v-for="(t, i) in cols[seg]" :key="t.id" :t="t" :i="i" :now="nowTs"
-                   :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
-        <p class="muted small" style="padding: 18px 6px" v-if="!cols[seg].length && tasks.length">该状态下暂无任务</p>
-      </div>
-
-      <div class="empty" v-if="tasksLoaded && !tasks.length">
-        <h2 class="display-sm">派发你的第一个任务</h2>
-        <p class="muted">写下任务内容，@ 一个或多个已接入的 Agent。它们会在一分钟内拉取到任务，执行完毕后把结果写回这里；同一任务可以随时追加指令，Agent 会在原会话里接着干。</p>
-        <button class="btn primary" type="button" @click="openTaskNew">新建任务</button>
+      <div class="toolrow-right">
+        <span class="sync" :title="sseState === 'live' ? 'SSE 实时同步中' : '连接中断，重连中'">
+          <span class="dot" :class="sseState === 'live' ? 'live' : 'retry'"></span>
+          <span class="sync-txt mono">{{ sseState === 'live' ? '实时同步' : '重连中' }}</span>
+        </span>
+        <button v-if="view === 'tasks'" class="btn primary" type="button" @click="openTaskNew">新建任务</button>
+        <button v-else class="btn primary" type="button" @click="openEnroll">接入新 Agent</button>
       </div>
     </div>
 
-    <!-- Agent 看板 -->
-    <div v-show="view === 'agents'">
-      <header class="view-head">
-        <div>
-          <h1 class="display">Agent</h1>
-          <p class="stats mono" v-if="agentStat">{{ agentStat }}</p>
+    <div class="dash-body">
+      <div class="dash-main">
+
+        <!-- 任务流（默认视图）：按时间倒排，分「今天 / 昨天 / 更早」 -->
+        <div v-show="view === 'tasks'" class="flow">
+          <template v-if="tasks.length">
+            <section class="tgroup" v-for="g in groupedTasks" :key="g.key" :aria-label="g.label">
+              <h2 class="sec-head">
+                <span class="sec-label mono">{{ g.label }}</span>
+                <span class="sec-rule" aria-hidden="true"></span>
+                <span class="sec-note mono">{{ g.note }}</span>
+              </h2>
+              <task-card v-for="(t, i) in g.items" :key="t.id" :t="t" :i="i" :now="nowTs"
+                         :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
+            </section>
+            <p class="flow-none muted" v-if="!groupedTasks.length">该状态下暂无任务</p>
+          </template>
+
+          <div class="empty" v-if="tasksLoaded && !tasks.length">
+            <h2 class="display-sm">派发你的第一个任务</h2>
+            <p class="muted">写下任务内容，@ 一个或多个已接入的 Agent。它们会在一分钟内拉取到任务，执行完毕后把结果写回这里；同一任务可以随时追加指令，Agent 会在原会话里接着干。</p>
+            <button class="btn primary" type="button" @click="openTaskNew">新建任务</button>
+          </div>
         </div>
-        <button class="btn primary" type="button" @click="openEnroll"><span class="txt-full">接入新 Agent</span><span class="txt-short">＋ 接入</span></button>
-      </header>
 
-      <div class="agent-grid" v-if="agentsLoading">
-        <div class="acard" v-for="i in 3" :key="'sk' + i">
-          <div class="sk" style="width: 60%"></div>
-          <div class="sk" style="width: 90%; margin-top: 10px"></div>
+        <!-- Agent 名单：同为编辑行 -->
+        <div v-show="view === 'agents'" class="flow">
+          <div class="arow-sk-list" v-if="agentsLoading">
+            <div class="arow-sk" v-for="i in 3" :key="'sk' + i">
+              <span class="sk-dot"></span>
+              <div class="sk-col">
+                <div class="sk sk-w28"></div>
+                <div class="sk sk-w52"></div>
+              </div>
+            </div>
+          </div>
+
+          <template v-else-if="agents.length">
+            <agent-card v-for="a in sortedAgents" :key="a.id" :a="a" :now="nowTs" :timeout="onlineTimeout"
+                        :last="latestByAgent[a.id] || null"
+                        @remove="removeAgent" @open-task="goTask"></agent-card>
+          </template>
+
+          <div class="empty" v-else>
+            <h2 class="display-sm">从一段指令开始</h2>
+            <p class="muted">生成一段接入指令，发给你任意一台机器上的 Agent，它会自己完成注册并开始上报心跳。</p>
+            <ol class="steps">
+              <li><b>生成指令</b><span>点击右上角「接入新 Agent」，令牌 24 小时内有效</span></li>
+              <li><b>发给 Agent</b><span>原样粘贴到它的对话窗口，等待它汇报执行结果</span></li>
+              <li><b>回到这里</b><span>状态灯变绿，即接入完成</span></li>
+            </ol>
+            <button class="btn primary" type="button" @click="openEnroll">生成接入指令</button>
+          </div>
         </div>
+
       </div>
 
-      <div class="agent-grid" v-else-if="agents.length">
-        <agent-card v-for="a in sortedAgents" :key="a.id" :a="a" :now="nowTs" :timeout="onlineTimeout"
-                    :last="latestByAgent[a.id] || null"
-                    @remove="removeAgent" @open-task="goTask"></agent-card>
-      </div>
-
-      <div class="empty" v-else>
-        <h2 class="display-sm">从一段指令开始</h2>
-        <p class="muted">生成一段接入指令，发给你任意一台机器上的 Agent，它会自己完成注册并开始上报心跳。</p>
-        <ol class="steps">
-          <li><b>生成指令</b><span>点击右上角「接入新 Agent」，令牌 24 小时内有效</span></li>
-          <li><b>发给 Agent</b><span>原样粘贴到它的对话窗口，等待它汇报执行结果</span></li>
-          <li><b>回到这里</b><span>状态灯变绿，即接入完成</span></li>
-        </ol>
-        <button class="btn primary" type="button" @click="openEnroll">生成接入指令</button>
-      </div>
+      <!-- 宽屏右栏 rail（≥1200px）：AGENTS 名单 + 版次统计 -->
+      <aside class="rail" v-show="view === 'tasks'" aria-label="Agent 与版次概览">
+        <section class="rail-sec">
+          <h2 class="rail-h mono">AGENTS</h2>
+          <div class="rail-agent" v-for="a in sortedAgents.slice(0, 8)" :key="a.id">
+            <span class="dot" :class="isOnline(a) ? 'on' : 'off'"></span>
+            <span class="rail-agent-name" :title="a.name">{{ a.name }}</span>
+            <span class="rail-agent-hb mono">{{ relTime(a.last_seen) }}</span>
+          </div>
+          <p class="rail-more mono" v-if="agents.length > 8">+ {{ agents.length - 8 }} 台</p>
+          <p class="muted small" v-if="!agents.length">尚未接入 Agent</p>
+        </section>
+        <section class="rail-sec">
+          <h2 class="rail-h mono">版次统计</h2>
+          <div class="rail-stat"><span>进行中</span><span class="mono">{{ counts.active }}</span></div>
+          <div class="rail-stat"><span>已完成</span><span class="mono">{{ counts.done }}</span></div>
+          <div class="rail-stat"><span>失败 / 取消</span><span class="mono">{{ counts.failed }}</span></div>
+          <div class="rail-stat total"><span>累计任务</span><span class="mono">{{ tasks.length }}</span></div>
+        </section>
+      </aside>
     </div>
   </section>
 </main>
@@ -270,7 +289,10 @@
     </header>
     <div class="sheet-body" ref="tdBody" v-if="detail">
       <p class="task-meta">
-        <span class="pill" :class="taskPill(detail.status)[1]">{{ taskPill(detail.status)[0] }}</span>
+        <span class="trow-status">
+          <span class="dot" :class="taskDot(detail.status)"></span>
+          <span class="st-label" :class="'stc-' + taskPill(detail.status)[1]">{{ taskPill(detail.status)[0] }}</span>
+        </span>
         <span class="mono muted small">{{ detail.task.id }}</span>
         <span class="muted small">创建于 {{ fmtTime(detail.task.created_at) }}<template v-if="detail.task.canceled_at">，取消于 {{ fmtTime(detail.task.canceled_at) }}</template></span>
       </p>
@@ -285,8 +307,8 @@
             <div class="asgn-head">
               <span class="dot" :class="dotClass(a.status)"></span>
               <span class="asgn-name">{{ a.agent_name }}<template v-if="!a.online">（离线）</template></span>
-              <span class="pill" :class="asgPill(a.status)[1]">{{ asgPill(a.status)[0] }}</span>
-              <span class="pill amber" v-if="a.stale">疑似卡住</span>
+              <span class="st-label" :class="'stc-' + asgPill(a.status)[1]">{{ asgPill(a.status)[0] }}</span>
+              <span class="st-label stc-amber" v-if="a.stale">疑似卡住</span>
             </div>
             <p class="sub small">{{ asgTimes(a) }}</p>
             <button class="btn text" type="button" v-if="a.status === 'delivered'" @click="requeue(a)">重新投递</button>

@@ -15,6 +15,13 @@ function fmtClock(ts) {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/* 刊式短时间：MM-DD HH:MM（任务行右缘） */
+function fmtMD(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function relTime(ts, now) {
   if (!ts) return "-";
   const diff = Math.max(0, now - ts);
@@ -58,6 +65,14 @@ function dotClass(status) {
   return "off";
 }
 
+/* 任务状态对应的语义灯 */
+function taskDot(s) {
+  if (s === "done") return "on";
+  if (s === "running" || s === "partial") return "pulse";
+  if (s === "failed") return "bad";
+  return "off"; // pending / canceled
+}
+
 /* 任务卡的最近活动时间 */
 function taskActivity(t) {
   let ts = t.created_at;
@@ -91,14 +106,6 @@ function taskSig(t) {
     if (a.delivered_at && a.delivered_at > mr) mr = a.delivered_at;
   }
   return t.status + "|" + maxSeq(t) + "|" + mr;
-}
-
-/* Agent 身份色：djb2 哈希取模 6，命中 CSS 里的 .av-0..5 策展盘。
-   不用真随机 hue——否则每次刷新都跳色，且容易撞进紫粉区。 */
-function avIdx(id) {
-  let h = 5381;
-  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) >>> 0;
-  return h % 6;
 }
 
 /* 复制到剪贴板：优先异步 clipboard API（安全上下文），
@@ -162,7 +169,7 @@ const app = createApp({
       loginForm: { user: "", pass: "", token: "" },
       loginError: "",
       view: "tasks", // tasks | agents
-      seg: "active",
+      taskFilter: "all", // all | active | done | failed
       agents: [],
       tasks: [],
       agentsLoading: true,
@@ -214,6 +221,37 @@ const app = createApp({
     counts() {
       const c = this.cols;
       return { active: c.active.length, done: c.done.length, failed: c.failed.length };
+    },
+    /* 任务流：按 taskFilter 过滤后按 created_at 倒序，分「今天 / 昨天 / 更早」，
+       组内保持倒序；空组不出小节眉 */
+    groupedTasks() {
+      const f = this.taskFilter;
+      const inFilter = (t) => {
+        if (f === "active") return t.status === "pending" || t.status === "running";
+        if (f === "done") return t.status === "done";
+        if (f === "failed") return t.status !== "pending" && t.status !== "running" && t.status !== "done";
+        return true;
+      };
+      const list = this.tasks.filter(inFilter).sort((a, b) => b.created_at - a.created_at);
+      const day0 = (ts) => { const d = new Date(ts * 1000); d.setHours(0, 0, 0, 0); return d.getTime(); };
+      const today0 = day0(this.nowTs);
+      const yest0 = today0 - 86400000;
+      const groups = [
+        { key: "today", label: "今天", items: [] },
+        { key: "yesterday", label: "昨天", items: [] },
+        { key: "earlier", label: "更早", items: [] },
+      ];
+      for (const t of list) {
+        const c = t.created_at * 1000;
+        groups[c >= today0 ? 0 : c >= yest0 ? 1 : 2].items.push(t);
+      }
+      return groups.filter((g) => g.items.length).map((g) => ({ ...g, note: g.items.length + " 项" }));
+    },
+    /* 刊头日期：中文日期 + 星期（随 nowTick 重算） */
+    mastheadDate() {
+      const d = new Date(this.nowTs * 1000);
+      const week = "日一二三四五六"[d.getDay()];
+      return `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日 · 星期${week}`;
     },
     taskStat() {
       if (!this.tasks.length) return "";
@@ -274,7 +312,7 @@ const app = createApp({
     this.boot();
   },
   methods: {
-    fmtTime, fmtClock, fmtSize, taskPill, asgPill, dotClass,
+    fmtTime, fmtClock, fmtMD, fmtSize, taskPill, asgPill, dotClass, taskDot,
     relTime(ts) { return relTime(ts, this.nowTs); },
     isOnline(a) { return this.nowTs - a.last_seen <= this.onlineTimeout; },
 
@@ -471,7 +509,7 @@ const app = createApp({
       this.lastSyncAt = Math.floor(Date.now() / 1000);
     },
 
-    /* 签名交互：SSE 推送到达时，变更卡片做 1.2s 珊瑚 ring 呼吸 */
+    /* 签名交互：SSE 推送到达时，变更任务行做 1.2s 蓝色 ring 呼吸 */
     markPulse(ids) {
       this.pulseIds = [...new Set([...this.pulseIds, ...ids])];
       const drop = new Set(ids);
@@ -804,32 +842,35 @@ const app = createApp({
   },
 });
 
-/* ---- 任务卡 ---- */
+/* ---- 任务编辑行 ---- */
 app.component("task-card", {
   props: ["t", "i", "now", "enter", "pulse"],
   emits: ["open"],
-  methods: { taskPill, asgPill, dotClass, latestPerAgent, maxSeq, taskActivity, relTime },
+  methods: { taskPill, asgPill, dotClass, taskDot, fmtMD, latestPerAgent, maxSeq, taskActivity, relTime },
   template: `
-  <div class="tcard" :class="{ enter: enter, pulsing: pulse }" :style="{ '--i': i }" @click="$emit('open', t.id)">
-    <div class="tcard-top">
-      <div class="tcard-title">{{ t.title }}</div>
-      <span class="pill" :class="taskPill(t.status)[1]">{{ taskPill(t.status)[0] }}</span>
-    </div>
-    <div class="tcard-snippet">{{ t.content }}</div>
-    <div class="tcard-foot">
-      <div class="chips">
-        <span class="chip" v-for="a in latestPerAgent(t)" :key="a.id"
+  <article class="trow" :class="['st-' + t.status, { enter: enter, pulsing: pulse }]" :style="{ '--i': i }" @click="$emit('open', t.id)">
+    <div class="trow-main">
+      <h3 class="trow-title" :title="t.title">{{ t.title }}</h3>
+      <div class="trow-meta">
+        <span class="tchip" v-for="a in latestPerAgent(t)" :key="a.id"
               :title="a.agent_name + ' · ' + asgPill(a.status)[0] + (a.stale ? ' · 疑似卡住' : '')">
-          <span class="dot" :class="dotClass(a.status)"></span>
-          <span>{{ a.agent_name }}</span>
+          <span class="dot" :class="dotClass(a.status)"></span><span class="tchip-name">@{{ a.agent_name }}</span>
         </span>
+        <span class="trow-seq mono" v-if="maxSeq(t) > 1">第 {{ maxSeq(t) }} 轮</span>
+        <span class="trow-rel mono">{{ relTime(taskActivity(t), now) }}</span>
       </div>
-      <span class="tcard-time">{{ (maxSeq(t) > 1 ? maxSeq(t) + ' 轮 · ' : '') + relTime(taskActivity(t), now) }}</span>
     </div>
-  </div>`,
+    <div class="trow-side">
+      <span class="trow-status">
+        <span class="dot" :class="taskDot(t.status)"></span>
+        <span class="st-label" :class="'stc-' + taskPill(t.status)[1]">{{ taskPill(t.status)[0] }}</span>
+      </span>
+      <span class="trow-time mono">{{ fmtMD(taskActivity(t)) }}</span>
+    </div>
+  </article>`,
 });
 
-/* ---- Agent 卡 ---- */
+/* ---- Agent 编辑行 ---- */
 app.component("agent-card", {
   props: ["a", "now", "timeout", "last"],
   emits: ["remove", "open-task"],
@@ -845,59 +886,35 @@ app.component("agent-card", {
     },
     persona() { return this.meta.persona || ""; },
     skills() { return Array.isArray(this.meta.skills) ? this.meta.skills.slice(0, 20) : []; },
-    fields() {
-      const m = this.meta;
-      // 执行器已升格为头部标签；未自报画像的老数据才回退到字段区兜底
-      const f = m.executor ? [] : [["执行器", "-"]];
-      f.push(
-        ["模型", m.model || "-"],
-        ["主机", this.a.hostname || "-"],
-        ["系统", this.a.os ? this.a.os + "/" + (this.a.arch || "?") : "-"],
-        ["IP", this.a.ip || "-"],
-        ["最后心跳", relTime(this.a.last_seen, this.now)],
-      );
-      return f;
-    },
     lastTime() {
       if (!this.last) return "";
       return relTime(this.last.asg.result_at || this.last.asg.delivered_at || this.last.task.created_at, this.now);
     },
+    heartbeat() { return relTime(this.a.last_seen, this.now); },
   },
-  methods: {
-    avIdx, dotClass,
-    firstOf(name) { return ([...String(name).trim()][0] || "?").toUpperCase(); },
-  },
+  methods: { dotClass },
   template: `
-  <div :class="['acard', 'av-' + avIdx(a.id), { off: !online }]">
-    <div class="acard-head">
-      <div class="acard-title">
-        <span class="acard-ava">{{ firstOf(a.name) }}</span>
-        <span class="acard-name" :title="a.name">{{ a.name }}</span>
+  <div class="arow" :class="{ off: !online }">
+    <span class="dot arow-dot" :class="online ? 'on' : 'off'"></span>
+    <div class="arow-main">
+      <div class="arow-top">
+        <span class="arow-name" :title="a.name">{{ a.name }}</span>
+        <span class="arow-exec mono" v-if="execTag" :title="execTag">{{ execTag }}</span>
       </div>
-      <div class="acard-side">
-        <span class="acard-exec mono" v-if="execTag" :title="execTag">{{ execTag }}</span>
-        <span class="status-chip"><span class="dot" :class="online ? 'on' : 'off'"></span>{{ online ? '在线' : '离线' }}</span>
+      <div class="arow-sub" v-if="skills.length || persona">
+        <span class="tag mono" v-for="s in skills" :key="s" :title="s">{{ s }}</span>
+        <span class="arow-persona" v-if="persona" :title="persona">{{ persona }}</span>
       </div>
     </div>
-    <div class="acard-id mono">{{ a.id }}</div>
-    <div class="acard-persona" v-if="persona" :title="persona">{{ persona }}</div>
-    <dl class="acard-meta">
-      <div v-for="f in fields" :key="f[0]">
-        <dt>{{ f[0] }}</dt>
-        <dd :title="f[1]">{{ f[1] }}</dd>
-      </div>
-    </dl>
-    <div class="acard-skills" v-if="skills.length">
-      <span class="chip" v-for="s in skills" :key="s" :title="s"><span>{{ s }}</span></span>
-    </div>
-    <div class="acard-task" v-if="last" style="cursor: pointer" @click="$emit('open-task', last.task.id)">
+    <div class="arow-task" v-if="last" :title="'最近任务：' + last.task.title" @click="$emit('open-task', last.task.id)">
       <span class="dot" :class="dotClass(last.asg.status)"></span>
-      <span class="t" :title="last.task.title">{{ last.task.title }}</span>
-      <span class="tcard-time">{{ lastTime }}</span>
+      <span class="t">{{ last.task.title }}</span>
+      <span class="arow-time mono">{{ lastTime }}</span>
     </div>
-    <div class="acard-task" v-else><span class="none">暂无任务</span></div>
-    <div class="acard-foot">
-      <button class="btn danger-ghost acard-del" type="button" @click="$emit('remove', a)">下线</button>
+    <div class="arow-task none" v-else><span class="muted">暂无任务</span></div>
+    <div class="arow-side">
+      <span class="arow-hb mono" :title="'最后心跳 ' + heartbeat">{{ heartbeat }}</span>
+      <button class="btn text arow-del" type="button" @click="$emit('remove', a)">下线</button>
     </div>
   </div>`,
 });
@@ -929,7 +946,7 @@ app.component("att-item", {
     <img v-if="kind === 'image'" class="att-preview" :src="url" :alt="att.name" loading="lazy">
     <audio v-else-if="kind === 'audio'" class="att-media" controls :src="url"></audio>
     <video v-else-if="kind === 'video'" class="att-media" controls :src="url"></video>
-    <a v-else-if="kind === 'pdf'" class="btn text att-dl" style="margin-top: 8px" :href="url" target="_blank" rel="noopener">预览 PDF</a>
+    <a v-else-if="kind === 'pdf'" class="btn text att-dl att-dl-top" :href="url" target="_blank" rel="noopener">预览 PDF</a>
   </div>`,
 });
 
