@@ -57,10 +57,19 @@ EXECUTOR_VER=""
 META=""
 if command -v python3 >/dev/null 2>&1; then
   META=$(AM_PERSONA="${AM_PERSONA:-}" AM_MODEL="${AM_MODEL:-}" AM_SKILLS="${AM_SKILLS:-}" \
-    AM_EXECUTOR="$EXECUTOR" AM_EXECUTOR_VER="$EXECUTOR_VER" python3 - <<'PYMETA'
+    AM_EXECUTOR="$EXECUTOR" AM_EXECUTOR_VER="$EXECUTOR_VER" AM_META_PATH="$DIR/meta.json" python3 - <<'PYMETA'
 import json, os
 def clip(v, n): return (v or "").strip()[:n]
+# 升级重跑时以已存档画像为底：本次未提供的字段（人设/模型/技能）原样保留，
+# 执行器与版本始终以当前探测结果为准。要清空某字段请直接编辑 meta.json。
 m = {}
+try:
+    with open(os.environ.get("AM_META_PATH", ""), encoding="utf-8") as f:
+        old = json.load(f)
+    if isinstance(old, dict):
+        m = old
+except Exception:
+    pass
 if clip(os.environ.get("AM_EXECUTOR"), 32):     m["executor"] = clip(os.environ["AM_EXECUTOR"], 32)
 if clip(os.environ.get("AM_EXECUTOR_VER"), 32): m["executor_version"] = clip(os.environ["AM_EXECUTOR_VER"], 32)
 if clip(os.environ.get("AM_PERSONA"), 200):     m["persona"] = clip(os.environ["AM_PERSONA"], 200)
@@ -111,7 +120,7 @@ chmod 600 "$CFG"
 say "== 执行器: $RUN_TASK"
 
 # 能力画像本地存档：每次心跳自动携带上报；Agent 模型/技能变化时直接改写此文件即可，
-# 无需重跑本脚本。重跑 setup.sh 会用本次采集的画像覆盖它（与升级刷新语义一致）。
+# 无需重跑本脚本。重跑 setup.sh 为合并语义：新提供的字段覆盖、未提供的保留（升级不清档案）。
 [ -n "$META" ] || META="{}"
 printf '%s\n' "$META" > "$DIR/meta.json"
 chmod 600 "$DIR/meta.json"
@@ -359,8 +368,39 @@ trap 'rm -f "$outf"' EXIT
 HELP=$(openclaw agent --help 2>&1 || true)
 has() { case "$HELP" in *"$1"*) return 0;; *) return 1;; esac; }
 
-# openclaw 的插件体检等启动诊断会混进输出（stderr 已合并），写回前过滤掉
-show() { sed '/^\[plugins\]/d' "$outf"; }
+# openclaw 的插件体检/频道日志会混进输出（stderr 已合并），先滤掉 [xxx] 前缀行；
+# 新版 agent 命令默认吐出整份运行信封 JSON（runId/result.payloads/meta 一大坨），
+# 此时提炼出 assistant 可见文本再回写；旧版的纯文本输出原样透传。
+show() {
+  sed '/^\[[a-zA-Z0-9_-][a-zA-Z0-9_-]*\] /d' "$outf" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.stdout.write(raw)
+    raise SystemExit
+if not isinstance(d, dict):
+    sys.stdout.write(raw)
+    raise SystemExit
+res = d.get("result") or {}
+texts = [p["text"] for p in res.get("payloads") or []
+         if isinstance(p, dict) and isinstance(p.get("text"), str) and p["text"].strip()]
+if texts:
+    sys.stdout.write("\n\n".join(texts) + "\n")
+    raise SystemExit
+meta = res.get("meta") or {}
+for v in (meta.get("finalAssistantVisibleText"), d.get("finalAssistantVisibleText")):
+    if isinstance(v, str) and v.strip():
+        sys.stdout.write(v if v.endswith("\n") else v + "\n")
+        raise SystemExit
+err = d.get("error")
+if isinstance(err, str) and err.strip():
+    sys.stdout.write("执行失败: " + err + "\n")
+    raise SystemExit
+sys.stdout.write(raw)
+' 2>/dev/null || sed '/^\[[a-zA-Z0-9_-][a-zA-Z0-9_-]*\] /d' "$outf"
+}
 
 TIMEOUT=""
 has --timeout && TIMEOUT="--timeout 1800"
@@ -394,7 +434,8 @@ if has --to; then
     openclaw agent --to "matrix-$2" --message "$1" $TIMEOUT --json >"$outf" 2>&1
     rc=$?
     show
-    sid=$(show | python3 -c 'import json,sys
+    # sessionId 必须从原始信封 JSON 里解析（show 已提炼成纯文本，不再是 JSON）
+    sid=$(sed '/^\[[a-zA-Z0-9_-][a-zA-Z0-9_-]*\] /d' "$outf" | python3 -c 'import json,sys
 try:
   d=json.load(sys.stdin)
 except Exception:

@@ -350,7 +350,7 @@ git pull && go build -o agent-matrix . && systemctl restart agent-matrix   # 或
 
 所有状态都在 `AGENT_MATRIX_DB` 指向的单个 SQLite 文件里，重启不清空；启动时自动 `CREATE TABLE IF NOT EXISTS`，新版本需要的表自动建好。**不要删库重来**——删库会丢掉管理员账号、所有 Agent 凭证与任务历史。
 
-**已接入的 Agent**：`setup.sh` 幂等，重跑一遍即升级到最新执行器（已有 config 自动跳过注册，心跳凭证不变，只更新脚本与定时任务）。两种触发方式任选：
+**已接入的 Agent**：`setup.sh` 幂等，重跑一遍即升级到最新执行器（已有 config 自动跳过注册，心跳凭证不变，只更新脚本与定时任务；能力画像合并保留，不会被清成空档案）。两种触发方式任选：
 
 1. 直接派发一个自升级任务 @ 目标 Agent：内容写「执行 `curl -fsS <平台地址>/setup.sh -o /tmp/am-setup.sh && sh /tmp/am-setup.sh` 并汇报最后一行」——脚本写入是原子替换（临时文件 + mv），正在运行的执行器不会错乱
 2. 能 SSH 的话就手动：`curl -fsS <平台地址>/setup.sh | sh`

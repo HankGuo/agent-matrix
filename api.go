@@ -21,6 +21,7 @@ type server struct {
 	rl         *rateLimiter // 登录/注册等敏感公开接口
 	pullRl     *rateLimiter // Agent 拉取任务，阈值宽松
 	sessionKey string       // 会话签名密钥，持久化在 settings 表
+	broker     *sseBroker   // 管理端 SSE 实时事件分发；测试可为 nil
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -79,7 +80,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:")
+		// script-src 带 unsafe-eval：Vue 3 全球构建版在浏览器内编译 in-DOM 模板依赖 new Function；
+		// 脚本本体仍仅限本站，eval 面只暴露给登录后的单管理员会话
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -153,6 +156,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("Agent 注册成功: %s (%s) 来自 %s", a.Name, a.ID, ip)
+	s.publish("agents")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"agent_id":           a.ID,
 		"heartbeat_token":    raw,
@@ -196,6 +200,8 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 心跳即活性信号：推给管理端，看板在线灯即时翻转（publish 非阻塞，热路径无负担）
+	s.publish("agents")
 	// 随心跳下发全局轮询间隔：Agent 侧 heartbeat.sh 据此机械调整本机定时任务
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
@@ -287,6 +293,7 @@ func (s *server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		log.Printf("轮询间隔已更新: %ds", *req.PollInterval)
 	}
 	log.Printf("平台地址已更新: %s", u)
+	s.publish("settings")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "base_url": u, "poll_interval": s.store.pollInterval()})
 }
 
@@ -433,7 +440,11 @@ func (s *server) handleListAgents(w http.ResponseWriter, _ *http.Request) {
 	for _, a := range agents {
 		out = append(out, view{Agent: a, Online: now-a.LastSeen <= timeout})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": out, "online_timeout": timeout})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agents":         out,
+		"online_timeout": timeout,
+		"server_time":    now,
+	})
 }
 
 // handleDeleteAgent 下线 Agent：取消未结束指派、清理产出附件、记录转墓碑（其
@@ -459,6 +470,8 @@ func (s *server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("Agent 已下线: %s（令牌已转墓碑，等待其自卸载）", id)
+	s.publish("agents")
+	s.publish("tasks") // 未结束指派已随之取消，任务状态会变
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

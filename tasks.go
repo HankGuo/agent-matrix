@@ -144,6 +144,7 @@ func (s *server) handlePullTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(tasks) > 0 {
 		log.Printf("Agent %s 拉取了 %d 个任务", a.ID, len(tasks))
+		s.publish("tasks") // 指派 pending → delivered，看板执行中状态要实时变
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": out, "server_time": time.Now().Unix()})
 }
@@ -178,6 +179,7 @@ func (s *server) handleWriteResult(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		log.Printf("任务结果已回写: 指派 %s 状态 %s (%s)", id, req.Status, a.ID)
+		s.publish("tasks")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	case errors.Is(err, errAssignNotFound):
 		writeError(w, http.StatusNotFound, "指派不存在")
@@ -277,6 +279,7 @@ func (s *server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("任务已创建: %s %q，指派给 %d 个 Agent，附件 %d 个", t.ID, t.Title, len(ids), len(files))
+	s.publish("tasks")
 	writeJSON(w, http.StatusCreated, map[string]any{"task": t})
 }
 
@@ -302,7 +305,11 @@ func (s *server) handleListTasks(w http.ResponseWriter, _ *http.Request) {
 			Assignments: s.assignmentViews(as, false),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks":          out,
+		"server_time":    time.Now().Unix(),
+		"online_timeout": int64(s.cfg.OnlineTimeout.Seconds()),
+	})
 }
 
 // handleTaskDetail 任务详情（含各指派结果全文）。
@@ -352,6 +359,7 @@ func (s *server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		log.Printf("任务已取消: %s", r.PathValue("id"))
+		s.publish("tasks")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	case errors.Is(err, errTaskNotFound):
 		writeError(w, http.StatusNotFound, "任务不存在")
@@ -369,6 +377,7 @@ func (s *server) handleRequeueAssignment(w http.ResponseWriter, r *http.Request)
 	switch {
 	case err == nil:
 		log.Printf("指派已重新投递: %s", r.PathValue("id"))
+		s.publish("tasks")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	case errors.Is(err, errAssignState):
 		writeError(w, http.StatusConflict, "仅「执行中」的指派可以重新投递")
@@ -396,6 +405,7 @@ func (s *server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	log.Printf("任务已删除: %s（清理 %d 个附件文件）", id, len(keys))
+	s.publish("tasks")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -451,6 +461,7 @@ func (s *server) handleCreateFollowup(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		log.Printf("任务 %s 追加第 %d 轮，指派给 %d 个 Agent", id, seq, len(ids))
+		s.publish("tasks")
 		writeJSON(w, http.StatusCreated, map[string]any{"seq": seq})
 	case errors.Is(err, errTaskNotFound):
 		writeError(w, http.StatusNotFound, "任务不存在")

@@ -1,229 +1,7 @@
-/* Agent Matrix WebUI — 任务优先的双看板控制台 */
+/* Agent Matrix WebUI — Vue 3 内嵌版：SSE 实时推送 + 120s 兜底轮询 */
 "use strict";
 
-const $ = (sel) => document.querySelector(sel);
-
-const loginView = $("#loginView");
-const setupView = $("#setupView");
-const dashView = $("#dashView");
-const topActions = $("#topActions");
-let refreshTimer = null;
-let useTokenLogin = false;
-let firstLoad = true;
-
-async function api(path, opts = {}) {
-  // FormData 由浏览器自带 boundary，不能手动设 Content-Type
-  const isForm = opts.body instanceof FormData;
-  const res = await fetch(path, {
-    ...(isForm ? {} : { headers: { "Content-Type": "application/json" } }),
-    ...opts,
-  });
-  if (res.status === 401 && path !== "/api/login" && path !== "/api/setup") {
-    boot();
-    throw new Error("unauthorized");
-  }
-  return res;
-}
-
-/* 复制到剪贴板：优先异步 clipboard API（安全上下文），
-   微信/移动端 webview 回退 execCommand 路径。返回是否成功。 */
-async function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch { /* 落入兜底 */ }
-  }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0;";
-  document.body.appendChild(ta);
-  ta.select();
-  ta.setSelectionRange(0, ta.value.length); // iOS Safari 需要
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch { /* 保持 false */ }
-  ta.remove();
-  return ok;
-}
-
-/* 轻量提示条：toastSeq 代数保证连发时旧回调不会提前隐藏新 toast */
-let toastTimer = null;
-let toastSeq = 0;
-function toast(msg) {
-  const t = $("#toast");
-  t.textContent = msg;
-  t.hidden = false;
-  t.classList.add("show");
-  clearTimeout(toastTimer);
-  const seq = ++toastSeq;
-  toastTimer = setTimeout(() => {
-    if (seq !== toastSeq) return;
-    t.classList.remove("show");
-    setTimeout(() => {
-      if (seq !== toastSeq) return;
-      t.hidden = true;
-    }, 240);
-  }, 2200);
-}
-
-function hideAll() {
-  loginView.hidden = true;
-  setupView.hidden = true;
-  dashView.hidden = true;
-  topActions.hidden = true;
-  if (refreshTimer) clearInterval(refreshTimer);
-}
-
-function showLogin(envLogin) {
-  hideAll();
-  loginView.hidden = false;
-  $("#loginToggle").hidden = !envLogin;
-  $("#loginError").hidden = true;
-}
-
-function showSetup() {
-  hideAll();
-  setupView.hidden = false;
-  $("#setupError").hidden = true;
-}
-
-function showDash() {
-  hideAll();
-  dashView.hidden = false;
-  topActions.hidden = false;
-  applyHash();
-  loadAgents();
-  loadTasks();
-  refreshTimer = setInterval(() => {
-    loadAgents();
-    loadTasks();
-    if (currentTaskId && taskDetailPanel.classList.contains("show")) {
-      refreshTaskDetail();
-    }
-  }, 15000);
-}
-
-/* ---- 视图路由：#/tasks（默认）与 #/agents，支持 #/tasks/<id> 直达详情 ---- */
-let currentView = "tasks";
-
-function setView(v) {
-  currentView = v === "agents" ? "agents" : "tasks";
-  document.querySelectorAll("#dashTabs .tab").forEach((b) =>
-    b.classList.toggle("active", b.dataset.view === currentView));
-  $("#agentsView").hidden = currentView !== "agents";
-  $("#tasksView").hidden = currentView !== "tasks";
-}
-
-function applyHash() {
-  const h = location.hash;
-  const m = h.match(/^#\/tasks\/(tsk_[0-9a-f]+)$/);
-  if (h.startsWith("#/agents")) {
-    setView("agents");
-  } else {
-    setView("tasks");
-  }
-  if (m) {
-    openTaskDetail(m[1]);
-  } else if (currentTaskId) {
-    closePanels(); // 从详情退回列表（浏览器后退等）时关闭面板
-  }
-}
-
-document.querySelectorAll("#dashTabs .tab").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    location.hash = "#/" + btn.dataset.view;
-  });
-});
-window.addEventListener("hashchange", () => {
-  if (!dashView.hidden) applyHash();
-});
-
-/* ---- 初始化（首次访问强制设置账号） ---- */
-
-$("#setupForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const errEl = $("#setupError");
-  errEl.hidden = true;
-  const username = $("#setupUser").value.trim();
-  const password = $("#setupPass").value;
-  if (password !== $("#setupPass2").value) {
-    errEl.textContent = "两次输入的密码不一致";
-    errEl.hidden = false;
-    return;
-  }
-  try {
-    const res = await api("/api/setup", {
-      method: "POST",
-      body: JSON.stringify({
-        username,
-        password,
-        base_url: $("#setupBaseURL").value.trim(),
-      }),
-    });
-    if (!res.ok) {
-      errEl.textContent = (await res.json()).error || "初始化失败";
-      errEl.hidden = false;
-      return;
-    }
-    showDash();
-  } catch {
-    errEl.textContent = "网络错误";
-    errEl.hidden = false;
-  }
-});
-
-/* ---- 登录 / 退出 ---- */
-
-$("#loginToggleLink").addEventListener("click", (e) => {
-  e.preventDefault();
-  useTokenLogin = !useTokenLogin;
-  $("#accountFields").hidden = useTokenLogin;
-  $("#tokenField").hidden = !useTokenLogin;
-  $("#loginToggleLink").textContent = useTokenLogin ? "改用账号密码登录" : "改用应急令牌登录";
-});
-
-$("#loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const errEl = $("#loginError");
-  errEl.hidden = true;
-  const body = useTokenLogin
-    ? { token: $("#loginToken").value }
-    : { username: $("#loginUser").value.trim(), password: $("#loginPass").value };
-  try {
-    const res = await api("/api/login", { method: "POST", body: JSON.stringify(body) });
-    if (!res.ok) {
-      errEl.textContent = (await res.json()).error || "登录失败";
-      errEl.hidden = false;
-      return;
-    }
-    $("#loginToken").value = "";
-    $("#loginPass").value = "";
-    showDash();
-  } catch {
-    errEl.textContent = "网络错误";
-    errEl.hidden = false;
-  }
-});
-
-$("#btnLogout").addEventListener("click", async () => {
-  await api("/api/logout", { method: "POST", body: "{}" });
-  boot();
-});
-
-/* ---- 时间 ---- */
-
-function relTime(ts) {
-  if (!ts) return "-";
-  const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-  if (diff < 10) return "刚刚";
-  if (diff < 60) return diff + " 秒前";
-  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
-  if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
-  return Math.floor(diff / 86400) + " 天前";
-}
+/* ---------- 纯工具（模块级，根实例与组件共用） ---------- */
 
 function fmtTime(ts) {
   const d = new Date(ts * 1000);
@@ -231,7 +9,27 @@ function fmtTime(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-/* ---- 状态元数据 ---- */
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function relTime(ts, now) {
+  if (!ts) return "-";
+  const diff = Math.max(0, now - ts);
+  if (diff < 10) return "刚刚";
+  if (diff < 60) return diff + " 秒前";
+  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
+  if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
+  return Math.floor(diff / 86400) + " 天前";
+}
+
+function fmtSize(n) {
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB";
+}
+
+/* ---------- 状态元数据 ---------- */
 
 const taskStatusMeta = {
   pending: ["待执行", "gray"],
@@ -248,405 +46,16 @@ const asgStatusMeta = {
   failed: ["失败", "red"],
   canceled: ["已取消", "gray"],
 };
-// 看板分列：进行中 / 已完成 / 失败与取消
-const boardCols = { active: ["pending", "running"], done: ["done"], failed: ["failed", "partial", "canceled"] };
 
-function pill(meta) {
-  const s = document.createElement("span");
-  s.className = "pill " + (meta ? meta[1] : "gray");
-  s.textContent = meta ? meta[0] : "?";
-  return s;
-}
+function taskPill(s) { return taskStatusMeta[s] || ["?", "gray"]; }
+function asgPill(s) { return asgStatusMeta[s] || [s || "?", "gray"]; }
 
 /* 指派状态对应的语义灯 */
-function statusDot(status) {
-  const d = document.createElement("span");
-  d.className = "dot";
-  if (status === "done") d.classList.add("on");
-  else if (status === "delivered") d.classList.add("pulse");
-  else if (status === "failed") d.style.background = "var(--danger)";
-  else d.classList.add("off");
-  return d;
-}
-
-/* ---- 数据缓存 ---- */
-let agentsCache = [];
-let tasksCache = [];
-
-/* ---- Agent 看板 ---- */
-
-function skeleton() {
-  const grid = $("#agentGrid");
-  grid.replaceChildren();
-  for (let i = 0; i < 3; i++) {
-    const card = document.createElement("div");
-    card.className = "acard";
-    const bar = document.createElement("div");
-    bar.className = "sk";
-    bar.style.width = "60%";
-    const bar2 = document.createElement("div");
-    bar2.className = "sk";
-    bar2.style.cssText = "width:90%;margin-top:10px";
-    card.append(bar, bar2);
-    grid.append(card);
-  }
-}
-
-async function loadAgents() {
-  if (firstLoad) skeleton();
-  let data;
-  try {
-    const res = await api("/api/agents");
-    if (!res.ok) return;
-    data = await res.json();
-  } catch {
-    return;
-  } finally {
-    firstLoad = false;
-  }
-  agentsCache = data.agents || [];
-  renderAgents();
-}
-
-function renderAgents() {
-  const agents = agentsCache;
-  const online = agents.filter((a) => a.online).length;
-  $("#agentStat").textContent = agents.length
-    ? `${agents.length} 台已纳管 · ${online} 在线 · ${agents.length - online} 离线`
-    : "";
-  const now = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  const tip = `更新于 ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())} · 每 15 秒自动刷新`;
-  $("#footSync").textContent = tip;
-
-  const hasAgents = agents.length > 0;
-  $("#agentGrid").style.display = hasAgents ? "" : "none";
-  $("#emptyTip").hidden = hasAgents;
-
-  const grid = $("#agentGrid");
-  grid.replaceChildren();
-  // 在线在前、离线沉底（sort 稳定，组内保持服务端返回顺序）；离线卡片另有置灰降级
-  const sorted = [...agents].sort((x, y) => (y.online ? 1 : 0) - (x.online ? 1 : 0));
-  for (const a of sorted) grid.append(agentCard(a));
-}
-
-/* Agent 的最近一条任务（跨任务取最新一轮指派） */
-function latestAssignmentOf(agentID) {
-  let best = null;
-  for (const t of tasksCache) {
-    for (const a of t.assignments || []) {
-      if (a.agent_id !== agentID) continue;
-      const key = t.created_at * 1000 + a.seq;
-      if (!best || key > best.key) best = { key, task: t, asg: a };
-    }
-  }
-  return best;
-}
-
-/* Agent 身份色：按 ID 哈希在精选色相刻度里稳定取色——不用真随机，
-   否则每 15 秒刷新就跳色。饱和度/亮度由 CSS 统一约束，保证浅色纸面上的对比度 */
-const AGENT_HUES = [174, 196, 221, 247, 273, 303, 333, 14, 43, 132];
-function agentHue(id) {
-  let h = 5381;
-  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) >>> 0;
-  return AGENT_HUES[h % AGENT_HUES.length];
-}
-
-function agentCard(a) {
-  const card = document.createElement("div");
-  card.className = "acard" + (a.online ? "" : " off");
-  card.style.setProperty("--agent-hue", agentHue(a.id));
-
-  // 能力画像（注册/升级时 Agent 自报的 meta JSON），容错解析
-  let metaInfo = {};
-  try { metaInfo = JSON.parse(a.meta || "{}"); } catch { metaInfo = {}; }
-
-  const head = document.createElement("div");
-  head.className = "acard-head";
-  const title = document.createElement("div");
-  title.className = "acard-title";
-  const ava = document.createElement("span");
-  ava.className = "acard-ava";
-  ava.textContent = ([...String(a.name).trim()][0] || "?").toUpperCase();
-  const nm = document.createElement("span");
-  nm.className = "acard-name";
-  nm.textContent = a.name;
-  nm.title = a.name;
-  title.append(ava, nm);
-  const side = document.createElement("div");
-  side.className = "acard-side";
-  if (metaInfo.executor) {
-    const ex = document.createElement("span");
-    ex.className = "acard-exec mono";
-    ex.textContent = metaInfo.executor + (metaInfo.executor_version ? " " + metaInfo.executor_version : "");
-    ex.title = ex.textContent;
-    side.append(ex);
-  }
-  const chip = document.createElement("span");
-  chip.className = "status-chip";
-  chip.append(a.online ? Object.assign(document.createElement("span"), { className: "dot on" })
-                       : Object.assign(document.createElement("span"), { className: "dot off" }));
-  const st = document.createElement("span");
-  st.textContent = a.online ? "在线" : "离线";
-  chip.append(st);
-  side.append(chip);
-  head.append(title, side);
-
-  const idLine = document.createElement("div");
-  idLine.className = "acard-id mono";
-  idLine.textContent = a.id;
-
-  // 人设：一句话能力描述，缺失则不占行
-  let persona = null;
-  if (metaInfo.persona) {
-    persona = document.createElement("div");
-    persona.className = "acard-persona";
-    persona.textContent = metaInfo.persona;
-    persona.title = metaInfo.persona;
-  }
-
-  const meta = document.createElement("dl");
-  meta.className = "acard-meta";
-  // 执行器已升格为头部标签；未自报画像的老数据才回退到字段区兜底
-  const fields = metaInfo.executor ? [] : [["执行器", "-"]];
-  fields.push(
-    ["模型", metaInfo.model || "-"],
-    ["主机", a.hostname || "-"],
-    ["系统", a.os ? `${a.os}/${a.arch || "?"}` : "-"],
-    ["IP", a.ip || "-"],
-    ["最后心跳", relTime(a.last_seen)],
-  );
-  for (const [k, v] of fields) {
-    const wrap = document.createElement("div");
-    const dtx = document.createElement("dt");
-    dtx.textContent = k;
-    const dd = document.createElement("dd");
-    dd.textContent = v;
-    dd.title = v;
-    wrap.append(dtx, dd);
-    meta.append(wrap);
-  }
-
-  // 技能 chips
-  const skills = Array.isArray(metaInfo.skills) ? metaInfo.skills.slice(0, 20) : [];
-  let skillsEl = null;
-  if (skills.length) {
-    skillsEl = document.createElement("div");
-    skillsEl.className = "acard-skills";
-    for (const s of skills) {
-      const c = document.createElement("span");
-      c.className = "chip";
-      c.title = String(s);
-      const n = document.createElement("span");
-      n.textContent = String(s);
-      c.append(n);
-      skillsEl.append(c);
-    }
-  }
-
-  // 最近任务行：Agent 视角的「它在干什么」
-  const taskLine = document.createElement("div");
-  taskLine.className = "acard-task";
-  const last = latestAssignmentOf(a.id);
-  if (last) {
-    taskLine.append(statusDot(last.asg.status));
-    const t = document.createElement("span");
-    t.className = "t";
-    t.textContent = last.task.title;
-    t.title = last.task.title;
-    const tm = document.createElement("span");
-    tm.className = "tcard-time";
-    tm.textContent = relTime(last.asg.result_at || last.asg.delivered_at || last.task.created_at);
-    taskLine.append(t, tm);
-    taskLine.style.cursor = "pointer";
-    taskLine.addEventListener("click", () => {
-      location.hash = "#/tasks/" + last.task.id;
-    });
-  } else {
-    const none = document.createElement("span");
-    none.className = "none";
-    none.textContent = "暂无任务";
-    taskLine.append(none);
-  }
-
-  const foot = document.createElement("div");
-  foot.className = "acard-foot";
-  const del = document.createElement("button");
-  del.className = "btn danger-ghost acard-del";
-  del.textContent = "下线";
-  del.addEventListener("click", () => removeAgent(a, del));
-  foot.append(del);
-
-  card.append(head, idLine);
-  if (persona) card.append(persona);
-  card.append(meta);
-  if (skillsEl) card.append(skillsEl);
-  card.append(taskLine, foot);
-  return card;
-}
-
-async function removeAgent(a, btn) {
-  if (!confirm(`确定下线 Agent「${a.name}」(${a.id})？\n\n它会立即从列表消失，并在一分钟左右收到信号、自动卸载本机的定时任务与配置。`)) return;
-  btn.disabled = true;
-  btn.textContent = "下线中…";
-  let res = null;
-  try {
-    res = await api("/api/agents/" + encodeURIComponent(a.id), { method: "DELETE" });
-  } catch { /* res 保持 null，按网络错误处理 */ }
-  btn.disabled = false;
-  btn.textContent = "下线";
-  if (!res) {
-    toast("网络错误，请重试");
-    return;
-  }
-  if (!res.ok) {
-    const d = await res.json().catch(() => ({}));
-    toast(d.error || "下线失败，请重试");
-    return;
-  }
-  toast(`「${a.name}」已下线，其一分钟左右将自动卸载定时任务与配置`);
-  loadAgents();
-}
-
-/* ---- 面板开关 ---- */
-
-const panel = $("#enrollPanel");
-const panelMask = $("#panelMask");
-const settingsPanel = $("#settingsPanel");
-const taskNewPanel = $("#taskNewPanel");
-const taskDetailPanel = $("#taskDetailPanel");
-
-function openPanel() {
-  $("#enrollForm").hidden = false;
-  $("#enrollResult").hidden = true;
-  $("#enrollLabel").value = "";
-  panel.classList.add("show");
-  panelMask.classList.add("show");
-  $("#enrollLabel").focus();
-}
-
-function closePanels() {
-  panel.classList.remove("show");
-  settingsPanel.classList.remove("show");
-  taskNewPanel.classList.remove("show");
-  taskDetailPanel.classList.remove("show");
-  panelMask.classList.remove("show");
-  if (currentTaskId) {
-    currentTaskId = null;
-    if (location.hash.startsWith("#/tasks/")) location.hash = "#/tasks";
-  }
-}
-
-$("#btnNew").addEventListener("click", openPanel);
-$("#btnNewEmpty").addEventListener("click", openPanel);
-$("#btnClose").addEventListener("click", closePanels);
-panelMask.addEventListener("click", closePanels);
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closePanels();
-});
-
-/* ---- 设置面板 ---- */
-
-$("#btnSettings").addEventListener("click", async () => {
-  try {
-    const res = await api("/api/settings");
-    if (res.ok) {
-      const data = await res.json();
-      $("#setBaseURL").value = data.base_url || "";
-      $("#setPollInterval").value = data.poll_interval || 60;
-      $("#settingsVer").textContent = "Agent Matrix v" + (data.version || "");
-    }
-  } catch { /* 保持旧值 */ }
-  $("#settingsSaved").hidden = true;
-  settingsPanel.classList.add("show");
-  panelMask.classList.add("show");
-});
-
-$("#btnSettingsClose").addEventListener("click", closePanels);
-
-$("#btnSaveSettings").addEventListener("click", async () => {
-  const interval = parseInt($("#setPollInterval").value, 10);
-  const res = await api("/api/settings", {
-    method: "POST",
-    body: JSON.stringify({
-      base_url: $("#setBaseURL").value,
-      poll_interval: Number.isInteger(interval) ? interval : null,
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    alert(data.error || "保存失败");
-    return;
-  }
-  $("#setBaseURL").value = data.base_url;
-  $("#setPollInterval").value = data.poll_interval;
-  const ok = $("#settingsSaved");
-  ok.hidden = false;
-  setTimeout(() => (ok.hidden = true), 2000);
-});
-
-$("#btnGen").addEventListener("click", async () => {
-  const btn = $("#btnGen");
-  btn.disabled = true;
-  try {
-    const res = await api("/api/enrollments", {
-      method: "POST",
-      body: JSON.stringify({ label: $("#enrollLabel").value }),
-    });
-    if (!res.ok) {
-      alert("生成失败：" + (await res.json()).error);
-      return;
-    }
-    const data = await res.json();
-    $("#enrollForm").hidden = true;
-    $("#enrollResult").hidden = false;
-    $("#promptText").textContent = data.prompt;
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-$("#btnCopy").addEventListener("click", async () => {
-  const btn = $("#btnCopy");
-  if (await copyText($("#promptText").textContent)) {
-    btn.textContent = "已复制 ✓";
-  } else {
-    // 剪贴板不可用时选中文本，给用户手动复制
-    const range = document.createRange();
-    range.selectNodeContents($("#promptText"));
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    btn.textContent = "已选中，请手动复制";
-  }
-  setTimeout(() => (btn.textContent = "复制指令"), 2000);
-});
-
-/* ---- 任务看板 ---- */
-
-let currentSeg = "active";
-
-document.querySelectorAll("#taskSeg .seg-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    currentSeg = btn.dataset.col;
-    document.querySelectorAll("#taskSeg .seg-btn").forEach((b) =>
-      b.classList.toggle("active", b === btn));
-    renderMobileCol();
-  });
-});
-
-async function loadTasks() {
-  let data;
-  try {
-    const res = await api("/api/tasks");
-    if (!res.ok) return;
-    data = await res.json();
-  } catch {
-    return;
-  }
-  tasksCache = data.tasks || [];
-  renderBoard();
-  if (agentsCache.length) renderAgents(); // Agent 卡片的“最近任务”依赖任务数据
+function dotClass(status) {
+  if (status === "done") return "on";
+  if (status === "delivered") return "pulse";
+  if (status === "failed") return "bad";
+  return "off";
 }
 
 /* 任务卡的最近活动时间 */
@@ -674,577 +83,854 @@ function maxSeq(t) {
   return s;
 }
 
-function taskCardEl(t) {
-  const card = document.createElement("div");
-  card.className = "tcard";
-  card.addEventListener("click", () => {
-    location.hash = "#/tasks/" + t.id;
-  });
-
-  const top = document.createElement("div");
-  top.className = "tcard-top";
-  const title = document.createElement("div");
-  title.className = "tcard-title";
-  title.textContent = t.title;
-  top.append(title, pill(taskStatusMeta[t.status]));
-
-  const snippet = document.createElement("div");
-  snippet.className = "tcard-snippet";
-  snippet.textContent = t.content;
-
-  const foot = document.createElement("div");
-  foot.className = "tcard-foot";
-  const chips = document.createElement("div");
-  chips.className = "chips";
-  for (const a of latestPerAgent(t)) {
-    const c = document.createElement("span");
-    c.className = "chip";
-    c.title = a.agent_name + " · " + (asgStatusMeta[a.status] || [a.status])[0] + (a.stale ? " · 疑似卡住" : "");
-    c.append(statusDot(a.status));
-    const n = document.createElement("span");
-    n.textContent = a.agent_name;
-    c.append(n);
-    chips.append(c);
+/* SSE 更新脉冲的变更签名：状态 / 轮次 / 最近一次投递或回写时刻 */
+function taskSig(t) {
+  let mr = 0;
+  for (const a of t.assignments || []) {
+    if (a.result_at && a.result_at > mr) mr = a.result_at;
+    if (a.delivered_at && a.delivered_at > mr) mr = a.delivered_at;
   }
-  const right = document.createElement("span");
-  right.className = "tcard-time";
-  const rounds = maxSeq(t);
-  right.textContent = (rounds > 1 ? rounds + " 轮 · " : "") + relTime(taskActivity(t));
-  foot.append(chips, right);
-
-  card.append(top, snippet, foot);
-  return card;
+  return t.status + "|" + maxSeq(t) + "|" + mr;
 }
 
-function renderBoard() {
-  const tasks = tasksCache;
-  const n = { active: 0, done: 0, failed: 0 };
-  for (const t of tasks) {
-    for (const col in boardCols) if (boardCols[col].includes(t.status)) n[col]++;
-  }
-  $("#taskStat").textContent = tasks.length
-    ? `${n.active} 进行中 · ${n.done} 已完成 · ${n.failed} 失败/取消，共 ${tasks.length} 个任务`
-    : "";
-  $("#cntActive").textContent = n.active;
-  $("#cntDone").textContent = n.done;
-  $("#cntFailed").textContent = n.failed;
-  $("#segActive").textContent = n.active;
-  $("#segDone").textContent = n.done;
-  $("#segFailed").textContent = n.failed;
-
-  const has = tasks.length > 0;
-  $("#taskBoard").style.display = has ? "" : "none";
-  $("#taskSeg").style.display = has ? "" : "none";
-  $("#taskMobile").style.display = has ? "" : "none";
-  $("#taskEmpty").hidden = has;
-
-  const cols = { active: $("#colActive"), done: $("#colDone"), failed: $("#colFailed") };
-  for (const c in cols) cols[c].replaceChildren();
-  for (const t of tasks) {
-    for (const col in boardCols) {
-      if (boardCols[col].includes(t.status)) {
-        cols[col].append(taskCardEl(t));
-        break;
-      }
-    }
-  }
-  renderMobileCol();
+/* Agent 身份色：djb2 哈希取模 6，命中 CSS 里的 .av-0..5 策展盘。
+   不用真随机 hue——否则每次刷新都跳色，且容易撞进紫粉区。 */
+function avIdx(id) {
+  let h = 5381;
+  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) >>> 0;
+  return h % 6;
 }
 
-function renderMobileCol() {
-  const box = $("#taskMobile");
-  box.replaceChildren();
-  for (const t of tasksCache) {
-    if (boardCols[currentSeg].includes(t.status)) box.append(taskCardEl(t));
+/* 复制到剪贴板：优先异步 clipboard API（安全上下文），
+   微信/移动端 webview 回退 execCommand 路径。返回是否成功。 */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* 落入兜底 */ }
   }
-  if (!box.children.length && tasksCache.length) {
-    const p = document.createElement("p");
-    p.className = "muted small";
-    p.style.padding = "18px 6px";
-    p.textContent = "该状态下暂无任务";
-    box.append(p);
-  }
-}
-
-/* ---- 新建任务 ---- */
-let pendingAtts = [];
-
-function fmtSize(n) {
-  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB";
-}
-
-function attRow(file) {
-  const row = document.createElement("div");
-  row.className = "att-row";
-  const nm = document.createElement("span");
-  nm.className = "att-name";
-  nm.textContent = file.name + "（" + fmtSize(file.size) + "）";
-  nm.title = file.name;
-  const desc = document.createElement("input");
-  desc.className = "att-desc";
-  desc.placeholder = "说明（可选）：这是什么、要重点关注什么";
-  desc.maxLength = 300;
-  const rm = document.createElement("button");
-  rm.className = "btn text att-rm";
-  rm.type = "button";
-  rm.textContent = "移除";
-  rm.addEventListener("click", () => {
-    pendingAtts = pendingAtts.filter((p) => p.file !== file);
-    row.remove();
-  });
-  row.append(nm, desc, rm);
-  return { row, desc };
-}
-
-$("#btnAddAtt").addEventListener("click", () => $("#attFile").click());
-$("#attFile").addEventListener("change", (e) => {
-  for (const f of e.target.files) {
-    if (pendingAtts.length >= 10) break;
-    if (f.size > 100 * 1048576) {
-      alert("「" + f.name + "」超过 100MB，已跳过");
-      continue;
-    }
-    const { row, desc } = attRow(f);
-    pendingAtts.push({ file: f, descEl: desc });
-    $("#attList").append(row);
-  }
-  e.target.value = "";
-});
-
-function agentPickEl(a, checked) {
-  const lab = document.createElement("label");
-  lab.className = "pick";
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  cb.value = a.id;
-  cb.checked = checked;
-  const dot = document.createElement("span");
-  dot.className = "dot " + (a.online ? "on" : "off");
-  const nm = document.createElement("span");
-  nm.textContent = a.name + (a.online ? "" : "（离线）");
-  lab.append(cb, dot, nm);
-  return lab;
-}
-
-async function openTaskNew() {
-  $("#taskTitle").value = "";
-  $("#taskContent").value = "";
-  $("#taskNewError").hidden = true;
-  pendingAtts = [];
-  $("#attList").replaceChildren();
-  const picker = $("#agentPicker");
-  picker.replaceChildren();
-  if (!agentsCache.length) {
-    const p = document.createElement("p");
-    p.className = "muted small";
-    p.textContent = "还没有已接入的 Agent，请先在「Agent」页接入。";
-    picker.append(p);
-  }
-  for (const a of agentsCache) picker.append(agentPickEl(a, false));
-  taskNewPanel.classList.add("show");
-  panelMask.classList.add("show");
-  $("#taskTitle").focus();
-}
-
-$("#btnNewTask").addEventListener("click", openTaskNew);
-$("#btnNewTaskEmpty").addEventListener("click", openTaskNew);
-$("#btnTaskNewClose").addEventListener("click", closePanels);
-
-$("#btnCreateTask").addEventListener("click", async () => {
-  const errEl = $("#taskNewError");
-  errEl.hidden = true;
-  const ids = [...document.querySelectorAll("#agentPicker input:checked")].map((i) => i.value);
-  const btn = $("#btnCreateTask");
-  // 两条路径统一防重：连点不得创建重复任务
-  btn.disabled = true;
-  btn.textContent = pendingAtts.length ? "上传中…" : "创建中…";
-  let res;
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0;";
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length); // iOS Safari 需要
+  let ok = false;
   try {
-    if (pendingAtts.length) {
-      // 有附件走 multipart：desc_i 与 file_i 按序配对（desc 必须在对应 file 之前）
-      const fd = new FormData();
-      fd.append("title", $("#taskTitle").value);
-      fd.append("content", $("#taskContent").value);
-      fd.append("agent_ids", ids.join(","));
-      for (const p of pendingAtts) {
-        fd.append("desc", p.descEl.value);
-        fd.append("file", p.file, p.file.name);
-      }
-      res = await api("/api/tasks", { method: "POST", body: fd }).catch(() => null);
-    } else {
-      res = await api("/api/tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          title: $("#taskTitle").value,
-          content: $("#taskContent").value,
-          agent_ids: ids,
-        }),
-      }).catch(() => null);
-    }
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "创建任务";
-  }
-  if (!res) {
-    errEl.textContent = "网络错误，请重试";
-    errEl.hidden = false;
-    return;
-  }
-  const data = await res.json();
-  if (!res.ok) {
-    errEl.textContent = data.error || "创建失败";
-    errEl.hidden = false;
-    return;
-  }
-  closePanels();
-  // 留在任务列表：新任务出现在列表顶部，由用户自己决定何时点进去
-  loadTasks();
-  toast(ids.length ? "任务已创建，派发给 " + ids.length + " 个 Agent" : "任务已创建");
-});
+    ok = document.execCommand("copy");
+  } catch { /* 保持 false */ }
+  ta.remove();
+  return ok;
+}
 
-/* ---- 任务详情：按轮次的对话线程 ---- */
-let currentTaskId = null;
-// 追问草稿按任务隔离：切换任务时暂存/恢复，避免草稿串到别的任务
+/* ---------- API：401 一律回到 boot 重新探测会话 ---------- */
+let appVm = null;
+async function api(path, opts = {}) {
+  // FormData 由浏览器自带 boundary，不能手动设 Content-Type
+  const isForm = opts.body instanceof FormData;
+  const res = await fetch(path, {
+    ...(isForm ? {} : { headers: { "Content-Type": "application/json" } }),
+    ...opts,
+  });
+  if (res.status === 401 && path !== "/api/login" && path !== "/api/setup") {
+    if (appVm) appVm.boot();
+    throw new Error("unauthorized");
+  }
+  return res;
+}
+
+/* 追问草稿按任务隔离：切换任务时暂存/恢复，避免草稿串到别的任务 */
 const fuDrafts = new Map();
 
-async function openTaskDetail(id) {
-  if (!agentsCache.length) await loadAgents(); // 继续任务的选择器需要 Agent 名单
-  let d;
-  try {
-    const res = await api("/api/tasks/" + encodeURIComponent(id));
-    if (!res.ok) {
-      toast("任务不存在或加载失败");
-      return;
-    }
-    d = await res.json();
-  } catch {
-    toast("网络错误，请重试");
-    return;
-  }
-  // 确认能加载后再切换状态：先存旧任务草稿，再恢复目标任务草稿
-  const input = $("#fuContent");
-  if (currentTaskId && currentTaskId !== id && input.value.trim()) {
-    fuDrafts.set(currentTaskId, input.value);
-  }
-  input.value = fuDrafts.get(id) || "";
-  currentTaskId = id;
-  if (location.hash !== "#/tasks/" + id) {
-    location.hash = "#/tasks/" + id;
-  }
-  renderTaskDetail(d, true);
-  taskDetailPanel.classList.add("show");
-  panelMask.classList.add("show");
-}
+/* 轻量提示条：toastSeq 代数保证连发时旧回调不会提前隐藏新 toast */
+let toastTimer = null;
+let toastSeq = 0;
 
-/* 面板打开时的静默刷新：保留滚动位置（本来在底部则贴底） */
-async function refreshTaskDetail() {
-  if (!currentTaskId) return;
-  try {
-    const res = await api("/api/tasks/" + encodeURIComponent(currentTaskId));
-    if (!res.ok) return;
-    renderTaskDetail(await res.json(), false);
-  } catch { /* 忽略 */ }
-}
+const { createApp } = Vue;
 
-/* 附件条目：白名单类型内联预览，其余给下载链接 */
-function attEl(a, idx) {
-  const wrap = document.createElement("div");
-  wrap.className = "att-item";
-  const head = document.createElement("div");
-  head.className = "att-item-head";
-  const nm = document.createElement("span");
-  nm.className = "att-name";
-  nm.textContent = (idx != null ? "[附件" + idx + "] " : "") + a.name;
-  nm.title = a.name;
-  const size = document.createElement("span");
-  size.className = "sub small";
-  size.textContent = fmtSize(a.size);
-  const link = document.createElement("a");
-  link.className = "btn text att-dl";
-  link.href = "/api/attachments/" + encodeURIComponent(a.id) + "?download=1";
-  link.textContent = "下载";
-  head.append(nm, size, link);
-  wrap.append(head);
-  if (a.description) {
-    const d = document.createElement("p");
-    d.className = "sub small att-desc-view";
-    d.textContent = a.description;
-    wrap.append(d);
-  }
-  const url = "/api/attachments/" + encodeURIComponent(a.id);
-  if (/^image\//.test(a.mime) && a.mime !== "image/svg+xml") {
-    const img = document.createElement("img");
-    img.className = "att-preview";
-    img.src = url;
-    img.alt = a.name;
-    img.loading = "lazy";
-    wrap.append(img);
-  } else if (/^audio\//.test(a.mime)) {
-    const au = document.createElement("audio");
-    au.controls = true;
-    au.src = url;
-    au.className = "att-media";
-    wrap.append(au);
-  } else if (/^video\//.test(a.mime)) {
-    const v = document.createElement("video");
-    v.controls = true;
-    v.src = url;
-    v.className = "att-media";
-    wrap.append(v);
-  } else if (a.mime === "application/pdf") {
-    const a2 = document.createElement("a");
-    a2.className = "btn text att-dl";
-    a2.href = url;
-    a2.target = "_blank";
-    a2.rel = "noopener";
-    a2.textContent = "预览 PDF";
-    wrap.append(a2);
-  }
-  return wrap;
-}
+const app = createApp({
+  data() {
+    return {
+      screen: "boot", // boot | setup | login | dash
+      envLogin: false,
+      useTokenLogin: false,
+      version: "",
+      setupForm: { user: "", pass: "", pass2: "", baseURL: "" },
+      setupError: "",
+      loginForm: { user: "", pass: "", token: "" },
+      loginError: "",
+      view: "tasks", // tasks | agents
+      seg: "active",
+      agents: [],
+      tasks: [],
+      agentsLoading: true,
+      tasksLoaded: false,
+      onlineTimeout: 90,
+      serverOffset: 0, // 服务端时钟 - 本地时钟（秒），用于在线状态本地重算
+      nowTick: Math.floor(Date.now() / 1000),
+      sseState: "connecting", // live | retry
+      lastSyncAt: 0,
+      animEnter: false,
+      pulseIds: [],
+      panel: "", // "" | enroll | settings | taskNew | taskDetail
+      enrollLabel: "",
+      enrollPrompt: "",
+      enrolling: false,
+      copyPromptLabel: "复制指令",
+      settings: { base_url: "", poll_interval: 60 },
+      settingsSaved: false,
+      newTask: { title: "", content: "" },
+      newTaskChecked: [],
+      pendingAtts: [], // { file, desc }
+      taskNewError: "",
+      creating: false,
+      currentTaskId: "",
+      detail: null, // { task, status, assignments, outputs, inputs }
+      fuChecked: [],
+      fuContent: "",
+      fuError: "",
+      fuSending: false,
+      copiedAsgId: "",
+      copiedAsgLabel: "",
+      toastMsg: "",
+      toastOn: false,
+    };
+  },
+  computed: {
+    nowTs() {
+      return this.nowTick + this.serverOffset;
+    },
+    cols() {
+      const c = { active: [], done: [], failed: [] };
+      for (const t of this.tasks) {
+        if (t.status === "pending" || t.status === "running") c.active.push(t);
+        else if (t.status === "done") c.done.push(t);
+        else c.failed.push(t); // failed / partial / canceled
+      }
+      return c;
+    },
+    counts() {
+      const c = this.cols;
+      return { active: c.active.length, done: c.done.length, failed: c.failed.length };
+    },
+    taskStat() {
+      if (!this.tasks.length) return "";
+      const n = this.counts;
+      return `${n.active} 进行中 · ${n.done} 已完成 · ${n.failed} 失败/取消，共 ${this.tasks.length} 个任务`;
+    },
+    sortedAgents() {
+      const on = (a) => (this.isOnline(a) ? 1 : 0);
+      // 在线在前、离线沉底（sort 稳定，组内保持服务端返回顺序）
+      return [...this.agents].sort((x, y) => on(y) - on(x));
+    },
+    agentStat() {
+      if (!this.agents.length) return "";
+      const online = this.agents.filter((a) => this.isOnline(a)).length;
+      return `${this.agents.length} 台已纳管 · ${online} 在线 · ${this.agents.length - online} 离线`;
+    },
+    /* Agent 的最近一条任务（跨任务取最新一轮指派） */
+    latestByAgent() {
+      const map = {};
+      for (const t of this.tasks) {
+        for (const a of t.assignments || []) {
+          const key = t.created_at * 1000 + a.seq;
+          if (!map[a.agent_id] || key > map[a.agent_id].key) map[a.agent_id] = { key, task: t, asg: a };
+        }
+      }
+      return map;
+    },
+    /* 详情线程：按 seq 聚合成轮次 */
+    rounds() {
+      if (!this.detail) return [];
+      const map = new Map();
+      for (const a of this.detail.assignments || []) {
+        if (!map.has(a.seq)) map.set(a.seq, []);
+        map.get(a.seq).push(a);
+      }
+      return [...map.entries()].sort((x, y) => x[0] - y[0]).map(([seq, items]) => ({ seq, items }));
+    },
+    detailTerminal() {
+      return !!this.detail && ["done", "failed", "partial", "canceled"].includes(this.detail.status);
+    },
+    createLabel() {
+      if (!this.creating) return "创建任务";
+      return this.pendingAtts.length ? "上传中…" : "创建中…";
+    },
+  },
+  created() {
+    this._sigCache = {}; // taskId → 变更签名（非响应式）
+    this.pollTimer = null;
+    this.es = null;
+  },
+  mounted() {
+    window.addEventListener("hashchange", this.onHash);
+    document.addEventListener("keydown", this.onKey);
+    // 10s 心跳驱动相对时间与在线徽章的本地重算
+    this.tickTimer = setInterval(() => {
+      this.nowTick = Math.floor(Date.now() / 1000);
+    }, 10000);
+    this.boot();
+  },
+  methods: {
+    fmtTime, fmtClock, fmtSize, taskPill, asgPill, dotClass,
+    relTime(ts) { return relTime(ts, this.nowTs); },
+    isOnline(a) { return this.nowTs - a.last_seen <= this.onlineTimeout; },
 
-function renderTaskDetail(d, scrollToEnd) {
-  $("#tdTitle").textContent = d.task.title;
-  $("#tdStatus").replaceChildren(pill(taskStatusMeta[d.status]));
-  $("#tdId").textContent = d.task.id;
-  $("#tdTime").textContent =
-    "创建于 " + fmtTime(d.task.created_at) +
-    (d.task.canceled_at ? "，取消于 " + fmtTime(d.task.canceled_at) : "");
+    toast(msg) {
+      this.toastMsg = msg;
+      this.toastOn = true;
+      clearTimeout(toastTimer);
+      const seq = ++toastSeq;
+      toastTimer = setTimeout(() => {
+        if (seq === toastSeq) this.toastOn = false;
+      }, 2200);
+    },
 
-  const body = $("#tdBody");
-  const stickToEnd = scrollToEnd || body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+    /* ---- 启动：探测会话与初始化状态 ---- */
+    async boot() {
+      if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+      if (this.es) { this.es.close(); this.es = null; }
+      this.sseState = "connecting";
+      this.panel = "";
+      this.currentTaskId = "";
+      this.detail = null;
+      let st = null;
+      try { st = await (await fetch("/api/auth/status")).json(); } catch { /* 继续走探测 */ }
+      if (st) {
+        if (st.version) this.version = st.version;
+        if (st.base_url) this.setupForm.baseURL = st.base_url;
+        this.envLogin = !!st.env_login;
+      }
+      try {
+        const res = await fetch("/api/agents");
+        if (res.ok) { this.enterDash(); return; }
+      } catch { /* 落入登录/初始化 */ }
+      this.setupError = "";
+      this.loginError = "";
+      this.screen = st && st.needs_setup ? "setup" : "login";
+    },
 
-  // 按 seq 聚合成轮次
-  const rounds = new Map();
-  for (const a of d.assignments || []) {
-    if (!rounds.has(a.seq)) rounds.set(a.seq, []);
-    rounds.get(a.seq).push(a);
-  }
-  const seqs = [...rounds.keys()].sort((x, y) => x - y);
-  const outputs = d.outputs || {};
-  const inputs = d.inputs || [];
+    enterDash() {
+      this.screen = "dash";
+      this.$nextTick(() => this.applyHash());
+      this.loadAgents();
+      this.loadTasks();
+      this.connectSSE();
+      if (this.pollTimer) clearInterval(this.pollTimer);
+      // SSE 之外的兜底：长连接静默断线时 120s 自愈一次
+      this.pollTimer = setInterval(() => { this.loadAgents(); this.loadTasks(); }, 120000);
+    },
 
-  const thread = $("#tdThread");
-  thread.replaceChildren();
-  for (const seq of seqs) {
-    const group = rounds.get(seq);
-    const roundEl = document.createElement("div");
-    roundEl.className = "round";
+    /* ---- SSE：服务端只推 topic，数据仍走 JSON 接口拉取 ---- */
+    connectSSE() {
+      if (!window.EventSource) return;
+      if (this.es) this.es.close();
+      const es = new EventSource("/api/events");
+      this.es = es;
+      es.onopen = () => { this.sseState = "live"; };
+      es.onerror = () => { this.sseState = "retry"; }; // EventSource 自动重连
+      es.onmessage = (e) => {
+        let m;
+        try { m = JSON.parse(e.data); } catch { return; }
+        if (!m || !m.topic) return;
+        if (m.topic === "tasks") {
+          this.loadTasks();
+          if (this.currentTaskId && this.panel === "taskDetail") this.refreshDetail();
+        } else if (m.topic === "agents") {
+          this.loadAgents();
+        }
+      };
+    },
 
-    const label = document.createElement("div");
-    label.className = "round-label";
-    label.textContent = seqs.length > 1 ? "第 " + seq + " 轮 / 共 " + seqs.length + " 轮" : "任务指令";
-    roundEl.append(label);
+    /* ---- 认证 ---- */
+    async submitSetup() {
+      this.setupError = "";
+      const f = this.setupForm;
+      if (f.pass !== f.pass2) {
+        this.setupError = "两次输入的密码不一致";
+        return;
+      }
+      try {
+        const res = await api("/api/setup", {
+          method: "POST",
+          body: JSON.stringify({ username: f.user.trim(), password: f.pass, base_url: f.baseURL.trim() }),
+        });
+        if (!res.ok) {
+          this.setupError = (await res.json()).error || "初始化失败";
+          return;
+        }
+        this.enterDash();
+      } catch {
+        this.setupError = "网络错误";
+      }
+    },
 
-    const instr = document.createElement("div");
-    instr.className = "instr";
-    const who = document.createElement("span");
-    who.className = "who";
-    who.textContent = "你 · " + fmtTime(group[0].created_at || d.task.created_at);
-    instr.append(who, document.createTextNode(group[0].content));
-    roundEl.append(instr);
+    toggleTokenLogin() {
+      this.useTokenLogin = !this.useTokenLogin;
+    },
 
-    // 附件只在首轮指令下展示（输入件挂在任务上）
-    if (seq === 1 && inputs.length) {
-      inputs.forEach((a, i) => roundEl.append(attEl(a, i + 1)));
-    }
+    async submitLogin() {
+      this.loginError = "";
+      const body = this.useTokenLogin
+        ? { token: this.loginForm.token }
+        : { username: this.loginForm.user.trim(), password: this.loginForm.pass };
+      try {
+        const res = await api("/api/login", { method: "POST", body: JSON.stringify(body) });
+        if (!res.ok) {
+          this.loginError = (await res.json()).error || "登录失败";
+          return;
+        }
+        this.loginForm.token = "";
+        this.loginForm.pass = "";
+        this.enterDash();
+      } catch {
+        this.loginError = "网络错误";
+      }
+    },
 
-    for (const a of group) roundEl.append(assignBlock(a, outputs[a.id] || []));
-    thread.append(roundEl);
-  }
+    async logout() {
+      await api("/api/logout", { method: "POST", body: "{}" });
+      this.boot();
+    },
 
-  const terminal = ["done", "failed", "partial", "canceled"].includes(d.status);
-  $("#btnCancelTask").hidden = terminal;
-  // 已取消的任务不能继续追加
-  $("#tdComposer").hidden = d.task.canceled_at != null;
+    /* ---- 视图路由：#/tasks（默认）与 #/agents，支持 #/tasks/<id> 直达详情 ---- */
+    onHash() {
+      if (this.screen === "dash") this.applyHash();
+    },
+    onKey(e) {
+      if (e.key === "Escape") this.closePanels();
+    },
+    goView(v) { location.hash = "#/" + v; },
+    goTask(id) { location.hash = "#/tasks/" + id; },
+    applyHash() {
+      const h = location.hash;
+      const m = h.match(/^#\/tasks\/(tsk_[0-9a-f]+)$/);
+      this.view = h.startsWith("#/agents") ? "agents" : "tasks";
+      if (m) {
+        // 防止 openTaskDetail 内部补写 hash 造成的重入
+        if (m[1] !== this.currentTaskId || this.panel !== "taskDetail") this.openTaskDetail(m[1]);
+      } else if (this.currentTaskId) {
+        this.closePanels(); // 从详情退回列表（浏览器后退等）时关闭面板
+      }
+    },
+    closePanels() {
+      this.panel = "";
+      if (this.currentTaskId) {
+        this.currentTaskId = "";
+        if (location.hash.startsWith("#/tasks/")) location.hash = "#/tasks";
+      }
+    },
 
-  // 继续任务的 Agent 选择器：默认勾选任务当前名单，可拉上其他在线 Agent
-  renderFollowupPicker(d);
+    /* ---- 数据加载 ---- */
+    async loadAgents() {
+      let data;
+      try {
+        const res = await api("/api/agents");
+        if (!res.ok) return;
+        data = await res.json();
+      } catch {
+        this.agentsLoading = false;
+        return;
+      }
+      if (typeof data.online_timeout === "number") this.onlineTimeout = data.online_timeout;
+      if (data.server_time) this.serverOffset = data.server_time - Math.floor(Date.now() / 1000);
+      this.agents = data.agents || [];
+      this.agentsLoading = false;
+      this.lastSyncAt = Math.floor(Date.now() / 1000);
+    },
 
-  if (stickToEnd) body.scrollTop = body.scrollHeight;
-}
+    async loadTasks() {
+      let data;
+      try {
+        const res = await api("/api/tasks");
+        if (!res.ok) return;
+        data = await res.json();
+      } catch {
+        return;
+      }
+      const fresh = data.tasks || [];
+      const sigs = {};
+      const changed = [];
+      for (const t of fresh) {
+        const sig = taskSig(t);
+        sigs[t.id] = sig;
+        if (this._sigCache[t.id] !== undefined && this._sigCache[t.id] !== sig) changed.push(t.id);
+      }
+      this._sigCache = sigs;
+      this.tasks = fresh;
+      if (this.tasksLoaded && changed.length) {
+        this.markPulse(changed);
+      } else if (!this.tasksLoaded && fresh.length) {
+        // 首次入场 stagger
+        this.animEnter = true;
+        setTimeout(() => (this.animEnter = false), 1300);
+      }
+      this.tasksLoaded = true;
+      this.lastSyncAt = Math.floor(Date.now() / 1000);
+    },
 
-function assignBlock(a, outs) {
-  const div = document.createElement("div");
-  div.className = "asgn st-" + a.status;
+    /* 签名交互：SSE 推送到达时，变更卡片做 1.2s 珊瑚 ring 呼吸 */
+    markPulse(ids) {
+      this.pulseIds = [...new Set([...this.pulseIds, ...ids])];
+      const drop = new Set(ids);
+      setTimeout(() => {
+        this.pulseIds = this.pulseIds.filter((x) => !drop.has(x));
+      }, 1250);
+    },
 
-  const head = document.createElement("div");
-  head.className = "asgn-head";
-  head.append(statusDot(a.status));
-  const nm = document.createElement("span");
-  nm.className = "asgn-name";
-  nm.textContent = a.agent_name + (a.online ? "" : "（离线）");
-  head.append(nm, pill(asgStatusMeta[a.status]));
-  if (a.stale) head.append(pill(["疑似卡住", "amber"]));
+    /* ---- 接入面板 ---- */
+    openEnroll() {
+      this.enrollLabel = "";
+      this.enrollPrompt = "";
+      this.copyPromptLabel = "复制指令";
+      this.panel = "enroll";
+      this.$nextTick(() => { const el = this.$refs.enrollLabel; if (el) el.focus(); });
+    },
 
-  const times = document.createElement("p");
-  times.className = "sub small";
-  const parts = [];
-  if (a.delivered_at) parts.push("投递于 " + fmtTime(a.delivered_at));
-  if (a.result_at) parts.push("回写于 " + fmtTime(a.result_at));
-  if (!parts.length) parts.push("等待 Agent 拉取");
-  times.textContent = parts.join("，");
+    async genEnrollment() {
+      this.enrolling = true;
+      try {
+        const res = await api("/api/enrollments", {
+          method: "POST",
+          body: JSON.stringify({ label: this.enrollLabel }),
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          this.toast("生成失败" + (d.error ? "：" + d.error : ""));
+          return;
+        }
+        const data = await res.json();
+        this.enrollPrompt = data.prompt;
+      } catch {
+        this.toast("网络错误，请重试");
+      } finally {
+        this.enrolling = false;
+      }
+    },
 
-  div.append(head, times);
+    async copyPrompt() {
+      if (await copyText(this.enrollPrompt)) {
+        this.copyPromptLabel = "已复制 ✓";
+      } else {
+        // 剪贴板不可用时选中文本，给用户手动复制
+        const el = document.getElementById("promptText");
+        if (el) {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        this.copyPromptLabel = "已选中，请手动复制";
+      }
+      setTimeout(() => (this.copyPromptLabel = "复制指令"), 2000);
+    },
 
-  if (a.status === "delivered") {
-    const rq = document.createElement("button");
-    rq.className = "btn text";
-    rq.textContent = "重新投递";
-    rq.addEventListener("click", async () => {
+    /* ---- 设置面板 ---- */
+    async openSettings() {
+      try {
+        const res = await api("/api/settings");
+        if (res.ok) {
+          const data = await res.json();
+          this.settings.base_url = data.base_url || "";
+          this.settings.poll_interval = data.poll_interval || 60;
+          if (data.version) this.version = data.version;
+        }
+      } catch { /* 保持旧值 */ }
+      this.settingsSaved = false;
+      this.panel = "settings";
+    },
+
+    async saveSettings() {
+      const interval = parseInt(this.settings.poll_interval, 10);
+      try {
+        const res = await api("/api/settings", {
+          method: "POST",
+          body: JSON.stringify({
+            base_url: this.settings.base_url,
+            poll_interval: Number.isInteger(interval) ? interval : null,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.toast(data.error || "保存失败");
+          return;
+        }
+        this.settings.base_url = data.base_url;
+        this.settings.poll_interval = data.poll_interval;
+        this.settingsSaved = true;
+        setTimeout(() => (this.settingsSaved = false), 2000);
+      } catch {
+        this.toast("网络错误，请重试");
+      }
+    },
+
+    /* ---- 新建任务 ---- */
+    openTaskNew() {
+      this.newTask = { title: "", content: "" };
+      this.newTaskChecked = [];
+      this.pendingAtts = [];
+      this.taskNewError = "";
+      this.panel = "taskNew";
+      this.$nextTick(() => { const el = this.$refs.taskTitle; if (el) el.focus(); });
+    },
+
+    onAttPicked(e) {
+      for (const f of e.target.files) {
+        if (this.pendingAtts.length >= 10) break;
+        if (f.size > 100 * 1048576) {
+          this.toast("「" + f.name + "」超过 100MB，已跳过");
+          continue;
+        }
+        this.pendingAtts.push({ file: f, desc: "" });
+      }
+      e.target.value = "";
+    },
+
+    async createTask() {
+      this.taskNewError = "";
+      const ids = this.newTaskChecked;
+      // 两条路径统一防重：连点不得创建重复任务
+      this.creating = true;
+      let res;
+      try {
+        if (this.pendingAtts.length) {
+          // 有附件走 multipart：desc_i 与 file_i 按序配对（desc 必须在对应 file 之前）
+          const fd = new FormData();
+          fd.append("title", this.newTask.title);
+          fd.append("content", this.newTask.content);
+          fd.append("agent_ids", ids.join(","));
+          for (const p of this.pendingAtts) {
+            fd.append("desc", p.desc);
+            fd.append("file", p.file, p.file.name);
+          }
+          res = await api("/api/tasks", { method: "POST", body: fd }).catch(() => null);
+        } else {
+          res = await api("/api/tasks", {
+            method: "POST",
+            body: JSON.stringify({
+              title: this.newTask.title,
+              content: this.newTask.content,
+              agent_ids: ids,
+            }),
+          }).catch(() => null);
+        }
+      } finally {
+        this.creating = false;
+      }
+      if (!res) {
+        this.taskNewError = "网络错误，请重试";
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        this.taskNewError = data.error || "创建失败";
+        return;
+      }
+      this.closePanels();
+      // 留在任务列表：新任务出现在列表顶部，由用户自己决定何时点进去
+      this.loadTasks();
+      this.toast(ids.length ? "任务已创建，派发给 " + ids.length + " 个 Agent" : "任务已创建");
+    },
+
+    /* ---- 任务详情 ---- */
+    async openTaskDetail(id) {
+      if (!this.agents.length) await this.loadAgents(); // 继续任务的选择器需要 Agent 名单
+      let d;
+      try {
+        const res = await api("/api/tasks/" + encodeURIComponent(id));
+        if (!res.ok) {
+          this.toast("任务不存在或加载失败");
+          return;
+        }
+        d = await res.json();
+      } catch {
+        this.toast("网络错误，请重试");
+        return;
+      }
+      // 确认能加载后再切换状态：先存旧任务草稿，再恢复目标任务草稿
+      if (this.currentTaskId && this.currentTaskId !== id && this.fuContent.trim()) {
+        fuDrafts.set(this.currentTaskId, this.fuContent);
+      }
+      this.fuContent = fuDrafts.get(id) || "";
+      this.fuError = "";
+      this.currentTaskId = id;
+      // 继续任务的选择器：默认勾选任务当前名单
+      const inTask = new Set((d.assignments || []).map((a) => a.agent_id));
+      this.fuChecked = this.agents.filter((a) => inTask.has(a.id)).map((a) => a.id);
+      if (location.hash !== "#/tasks/" + id) location.hash = "#/tasks/" + id;
+      this.detail = d;
+      this.panel = "taskDetail";
+      this.$nextTick(() => {
+        const b = this.$refs.tdBody;
+        if (b) b.scrollTop = b.scrollHeight;
+      });
+    },
+
+    /* 面板打开时的静默刷新：本来在底部则贴底，否则保持阅读位置。
+       （勾选状态由 v-model 持有，天然不被刷新打断） */
+    async refreshDetail() {
+      if (!this.currentTaskId) return;
+      const body = this.$refs.tdBody;
+      const stick = body && body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+      try {
+        const res = await api("/api/tasks/" + encodeURIComponent(this.currentTaskId));
+        if (!res.ok) return;
+        this.detail = await res.json();
+        if (stick) {
+          this.$nextTick(() => {
+            const b = this.$refs.tdBody;
+            if (b) b.scrollTop = b.scrollHeight;
+          });
+        }
+      } catch { /* 忽略 */ }
+    },
+
+    outputsOf(asgID) {
+      return (this.detail && this.detail.outputs && this.detail.outputs[asgID]) || [];
+    },
+
+    asgTimes(a) {
+      const parts = [];
+      if (a.delivered_at) parts.push("投递于 " + fmtTime(a.delivered_at));
+      if (a.result_at) parts.push("回写于 " + fmtTime(a.result_at));
+      return parts.length ? parts.join("，") : "等待 Agent 拉取";
+    },
+
+    async requeue(a) {
       const res = await api("/api/assignments/" + encodeURIComponent(a.id) + "/requeue", {
         method: "POST",
         body: "{}",
       });
       if (res.ok) {
-        refreshTaskDetail();
-        loadTasks();
+        this.refreshDetail();
+        this.loadTasks();
       }
-    });
-    div.append(rq);
-  }
-  if (a.result && a.result !== "…") {
-    const pre = document.createElement("pre");
-    pre.className = "result-view";
-    pre.textContent = a.result;
-    const bar = document.createElement("div");
-    bar.className = "result-bar";
-    const cp = document.createElement("button");
-    cp.className = "btn text";
-    cp.textContent = "复制结果";
-    cp.addEventListener("click", async () => {
+    },
+
+    async copyResult(a) {
       const ok = await copyText(a.result);
-      cp.textContent = ok ? "已复制 ✓" : "复制失败，请长按选择";
-      setTimeout(() => (cp.textContent = "复制结果"), 2000);
-    });
-    bar.append(cp);
-    div.append(pre, bar);
-  }
-  if (outs && outs.length) {
-    const oh = document.createElement("p");
-    oh.className = "sub small att-out-head";
-    oh.textContent = "产出文件（" + outs.length + "）";
-    div.append(oh);
-    for (const o of outs) div.append(attEl(o, null));
-  }
-  return div;
-}
+      this.copiedAsgId = a.id;
+      this.copiedAsgLabel = ok ? "已复制 ✓" : "复制失败，请长按选择";
+      setTimeout(() => {
+        if (this.copiedAsgId === a.id) this.copiedAsgId = "";
+      }, 2000);
+    },
 
-/* 继续任务：选择器与提交 */
-function renderFollowupPicker(d) {
-  const picker = $("#fuPicker");
-  const inTask = new Set();
-  for (const a of d.assignments || []) inTask.add(a.agent_id);
-  // 已勾选的尽量保留（静默刷新时不打断用户编辑）。
-  // 同一任务即保留勾选——包括"全部取消勾选"的状态，轮询不得静默恢复默认勾选
-  const prevChecked = new Set([...picker.querySelectorAll("input:checked")].map((i) => i.value));
-  const keep = picker.dataset.taskId === d.task.id;
-  picker.dataset.taskId = d.task.id;
-  picker.replaceChildren();
-  for (const a of agentsCache) {
-    const checked = keep ? prevChecked.has(a.id) : inTask.has(a.id);
-    picker.append(agentPickEl(a, checked));
-  }
-  if (!agentsCache.length) {
-    const p = document.createElement("span");
-    p.className = "muted small";
-    p.textContent = "无可用 Agent";
-    picker.append(p);
-  }
-}
+    async followup() {
+      this.fuError = "";
+      const content = this.fuContent.trim();
+      if (!content) {
+        this.fuError = "先写点内容";
+        return;
+      }
+      const ids = this.fuChecked;
+      if (!ids.length) {
+        this.fuError = "至少勾选一个 Agent";
+        return;
+      }
+      this.fuSending = true;
+      let res;
+      try {
+        res = await api("/api/tasks/" + encodeURIComponent(this.currentTaskId) + "/followup", {
+          method: "POST",
+          body: JSON.stringify({ content, agent_ids: ids }),
+        });
+      } catch {
+        res = null;
+      } finally {
+        this.fuSending = false;
+      }
+      if (!res) {
+        this.fuError = "网络错误，请重试";
+        return;
+      }
+      if (!res.ok) {
+        this.fuError = (await res.json()).error || "发送失败";
+        return;
+      }
+      this.fuContent = "";
+      fuDrafts.delete(this.currentTaskId); // 已发送的草稿不再保留
+      this.refreshDetail();
+      this.loadTasks();
+    },
 
-$("#btnFollowup").addEventListener("click", async () => {
-  const errEl = $("#fuError");
-  errEl.hidden = true;
-  const content = $("#fuContent").value.trim();
-  if (!content) {
-    errEl.textContent = "先写点内容";
-    errEl.hidden = false;
-    return;
-  }
-  const ids = [...document.querySelectorAll("#fuPicker input:checked")].map((i) => i.value);
-  if (!ids.length) {
-    errEl.textContent = "至少勾选一个 Agent";
-    errEl.hidden = false;
-    return;
-  }
-  const btn = $("#btnFollowup");
-  btn.disabled = true;
-  btn.textContent = "发送中…";
-  let res;
-  try {
-    res = await api("/api/tasks/" + encodeURIComponent(currentTaskId) + "/followup", {
-      method: "POST",
-      body: JSON.stringify({ content, agent_ids: ids }),
-    });
-  } catch {
-    res = null;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "发送";
-  }
-  if (!res) {
-    errEl.textContent = "网络错误，请重试";
-    errEl.hidden = false;
-    return;
-  }
-  if (!res.ok) {
-    errEl.textContent = (await res.json()).error || "发送失败";
-    errEl.hidden = false;
-    return;
-  }
-  $("#fuContent").value = "";
-  fuDrafts.delete(currentTaskId); // 已发送的草稿不再保留
-  refreshTaskDetail();
-  loadTasks();
+    async deleteTask() {
+      if (!this.currentTaskId) return;
+      if (!confirm("确定删除该任务？指派、结果与全部附件文件都会一并删除，不可恢复。")) return;
+      const res = await api("/api/tasks/" + encodeURIComponent(this.currentTaskId) + "/delete", {
+        method: "POST",
+        body: "{}",
+      });
+      if (res.ok) {
+        this.closePanels();
+        this.loadTasks();
+      }
+    },
+
+    async cancelTask() {
+      if (!this.currentTaskId) return;
+      if (!confirm("确定取消该任务？所有未结束的指派都会终止，且不能再追加新轮次。")) return;
+      const res = await api("/api/tasks/" + encodeURIComponent(this.currentTaskId) + "/cancel", {
+        method: "POST",
+        body: "{}",
+      });
+      if (res.ok) {
+        this.refreshDetail();
+        this.loadTasks();
+      }
+    },
+
+    async removeAgent(a) {
+      if (!confirm(`确定下线 Agent「${a.name}」(${a.id})？\n\n它会立即从列表消失，并在一分钟左右收到信号、自动卸载本机的定时任务与配置。`)) return;
+      let res = null;
+      try {
+        res = await api("/api/agents/" + encodeURIComponent(a.id), { method: "DELETE" });
+      } catch { /* res 保持 null，按网络错误处理 */ }
+      if (!res) {
+        this.toast("网络错误，请重试");
+        return;
+      }
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        this.toast(d.error || "下线失败，请重试");
+        return;
+      }
+      this.toast(`「${a.name}」已下线，其一分钟左右将自动卸载定时任务与配置`);
+      this.loadAgents();
+    },
+  },
 });
 
-$("#btnTdClose").addEventListener("click", closePanels);
-
-$("#btnDeleteTask").addEventListener("click", async () => {
-  if (!currentTaskId) return;
-  if (!confirm("确定删除该任务？指派、结果与全部附件文件都会一并删除，不可恢复。")) return;
-  const res = await api("/api/tasks/" + encodeURIComponent(currentTaskId) + "/delete", {
-    method: "POST",
-    body: "{}",
-  });
-  if (res.ok) {
-    closePanels();
-    loadTasks();
-  }
+/* ---- 任务卡 ---- */
+app.component("task-card", {
+  props: ["t", "i", "now", "enter", "pulse"],
+  emits: ["open"],
+  methods: { taskPill, asgPill, dotClass, latestPerAgent, maxSeq, taskActivity, relTime },
+  template: `
+  <div class="tcard" :class="{ enter: enter, pulsing: pulse }" :style="{ '--i': i }" @click="$emit('open', t.id)">
+    <div class="tcard-top">
+      <div class="tcard-title">{{ t.title }}</div>
+      <span class="pill" :class="taskPill(t.status)[1]">{{ taskPill(t.status)[0] }}</span>
+    </div>
+    <div class="tcard-snippet">{{ t.content }}</div>
+    <div class="tcard-foot">
+      <div class="chips">
+        <span class="chip" v-for="a in latestPerAgent(t)" :key="a.id"
+              :title="a.agent_name + ' · ' + asgPill(a.status)[0] + (a.stale ? ' · 疑似卡住' : '')">
+          <span class="dot" :class="dotClass(a.status)"></span>
+          <span>{{ a.agent_name }}</span>
+        </span>
+      </div>
+      <span class="tcard-time">{{ (maxSeq(t) > 1 ? maxSeq(t) + ' 轮 · ' : '') + relTime(taskActivity(t), now) }}</span>
+    </div>
+  </div>`,
 });
 
-$("#btnCancelTask").addEventListener("click", async () => {
-  if (!currentTaskId) return;
-  if (!confirm("确定取消该任务？所有未结束的指派都会终止，且不能再追加新轮次。")) return;
-  const res = await api("/api/tasks/" + encodeURIComponent(currentTaskId) + "/cancel", {
-    method: "POST",
-    body: "{}",
-  });
-  if (res.ok) {
-    refreshTaskDetail();
-    loadTasks();
-  }
+/* ---- Agent 卡 ---- */
+app.component("agent-card", {
+  props: ["a", "now", "timeout", "last"],
+  emits: ["remove", "open-task"],
+  computed: {
+    meta() {
+      // 能力画像（注册/升级时 Agent 自报的 meta JSON），容错解析
+      try { return JSON.parse(this.a.meta || "{}"); } catch { return {}; }
+    },
+    online() { return this.now - this.a.last_seen <= this.timeout; },
+    execTag() {
+      const m = this.meta;
+      return m.executor ? m.executor + (m.executor_version ? " " + m.executor_version : "") : "";
+    },
+    persona() { return this.meta.persona || ""; },
+    skills() { return Array.isArray(this.meta.skills) ? this.meta.skills.slice(0, 20) : []; },
+    fields() {
+      const m = this.meta;
+      // 执行器已升格为头部标签；未自报画像的老数据才回退到字段区兜底
+      const f = m.executor ? [] : [["执行器", "-"]];
+      f.push(
+        ["模型", m.model || "-"],
+        ["主机", this.a.hostname || "-"],
+        ["系统", this.a.os ? this.a.os + "/" + (this.a.arch || "?") : "-"],
+        ["IP", this.a.ip || "-"],
+        ["最后心跳", relTime(this.a.last_seen, this.now)],
+      );
+      return f;
+    },
+    lastTime() {
+      if (!this.last) return "";
+      return relTime(this.last.asg.result_at || this.last.asg.delivered_at || this.last.task.created_at, this.now);
+    },
+  },
+  methods: {
+    avIdx, dotClass,
+    firstOf(name) { return ([...String(name).trim()][0] || "?").toUpperCase(); },
+  },
+  template: `
+  <div :class="['acard', 'av-' + avIdx(a.id), { off: !online }]">
+    <div class="acard-head">
+      <div class="acard-title">
+        <span class="acard-ava">{{ firstOf(a.name) }}</span>
+        <span class="acard-name" :title="a.name">{{ a.name }}</span>
+      </div>
+      <div class="acard-side">
+        <span class="acard-exec mono" v-if="execTag" :title="execTag">{{ execTag }}</span>
+        <span class="status-chip"><span class="dot" :class="online ? 'on' : 'off'"></span>{{ online ? '在线' : '离线' }}</span>
+      </div>
+    </div>
+    <div class="acard-id mono">{{ a.id }}</div>
+    <div class="acard-persona" v-if="persona" :title="persona">{{ persona }}</div>
+    <dl class="acard-meta">
+      <div v-for="f in fields" :key="f[0]">
+        <dt>{{ f[0] }}</dt>
+        <dd :title="f[1]">{{ f[1] }}</dd>
+      </div>
+    </dl>
+    <div class="acard-skills" v-if="skills.length">
+      <span class="chip" v-for="s in skills" :key="s" :title="s"><span>{{ s }}</span></span>
+    </div>
+    <div class="acard-task" v-if="last" style="cursor: pointer" @click="$emit('open-task', last.task.id)">
+      <span class="dot" :class="dotClass(last.asg.status)"></span>
+      <span class="t" :title="last.task.title">{{ last.task.title }}</span>
+      <span class="tcard-time">{{ lastTime }}</span>
+    </div>
+    <div class="acard-task" v-else><span class="none">暂无任务</span></div>
+    <div class="acard-foot">
+      <button class="btn danger-ghost acard-del" type="button" @click="$emit('remove', a)">下线</button>
+    </div>
+  </div>`,
 });
 
-/* ---- 启动：探测会话与初始化状态 ---- */
-async function boot() {
-  try {
-    const res = await fetch("/api/agents");
-    if (res.ok) {
-      showDash();
-      return;
-    }
-  } catch { /* 继续走状态探测 */ }
-  try {
-    const st = await (await fetch("/api/auth/status")).json();
-    if (st.version) $("#ver").textContent = "Agent Matrix v" + st.version;
-    if (st.base_url) $("#setupBaseURL").value = st.base_url;
-    if (st.needs_setup) showSetup();
-    else showLogin(st.env_login);
-  } catch {
-    showLogin(false);
-  }
-}
+/* ---- 附件条目：白名单类型内联预览，其余给下载链接 ---- */
+app.component("att-item", {
+  props: ["att", "idx"],
+  computed: {
+    url() { return "/api/attachments/" + encodeURIComponent(this.att.id); },
+    dlUrl() { return this.url + "?download=1"; },
+    kind() {
+      const m = this.att.mime || "";
+      if (/^image\//.test(m) && m !== "image/svg+xml") return "image";
+      if (/^audio\//.test(m)) return "audio";
+      if (/^video\//.test(m)) return "video";
+      if (m === "application/pdf") return "pdf";
+      return "";
+    },
+  },
+  methods: { fmtSize },
+  template: `
+  <div class="att-item">
+    <div class="att-item-head">
+      <span class="att-name" :title="att.name">{{ idx != null ? '[附件' + idx + '] ' : '' }}{{ att.name }}</span>
+      <span class="sub small">{{ fmtSize(att.size) }}</span>
+      <a class="btn text att-dl" :href="dlUrl">下载</a>
+    </div>
+    <p class="sub small att-desc-view" v-if="att.description">{{ att.description }}</p>
+    <img v-if="kind === 'image'" class="att-preview" :src="url" :alt="att.name" loading="lazy">
+    <audio v-else-if="kind === 'audio'" class="att-media" controls :src="url"></audio>
+    <video v-else-if="kind === 'video'" class="att-media" controls :src="url"></video>
+    <a v-else-if="kind === 'pdf'" class="btn text att-dl" style="margin-top: 8px" :href="url" target="_blank" rel="noopener">预览 PDF</a>
+  </div>`,
+});
 
-boot();
+appVm = app.mount("#app");

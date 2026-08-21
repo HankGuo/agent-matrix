@@ -3,136 +3,161 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f3f5f7">
+<meta name="theme-color" content="#faf7f2">
 <title>Agent Matrix · 任务控制台</title>
 <meta name="description" content="轻量 Agent 任务派发与监控中心：任务看板优先，同一任务可持续追加、按会话演进。">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23171b20'/%3E%3Ccircle cx='12' cy='12' r='3' fill='%23f4f6f8'/%3E%3Ccircle cx='21' cy='12' r='3' fill='%23f4f6f8'/%3E%3Ccircle cx='16.5' cy='21' r='3' fill='%232fd4bd'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23fbe9e2'/%3E%3Ccircle cx='10.5' cy='12' r='3.4' fill='%23c2410c'/%3E%3Ccircle cx='21.5' cy='12' r='3.4' fill='%23f0a02e'/%3E%3Ccircle cx='16' cy='21.5' r='3.4' fill='%231da97c'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <a class="skip-link" href="#main">跳到主要内容</a>
 
+<div id="app" v-cloak>
 <header class="topbar">
   <div class="brand">
     <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="8" fill="#171b20"/>
-      <circle cx="12" cy="12" r="3" fill="#f4f6f8"/>
-      <circle cx="21" cy="12" r="3" fill="#f4f6f8"/>
-      <circle cx="16.5" cy="21" r="3" fill="#2fd4bd"/>
-      <path d="M14 14.2 15.4 18.4M19.4 14.2 17.9 18.4" stroke="#f4f6f8" stroke-width="1" opacity=".55"/>
+      <rect width="32" height="32" rx="9" fill="#fbe9e2"/>
+      <circle cx="10.5" cy="12" r="3.4" fill="#c2410c"/>
+      <circle cx="21.5" cy="12" r="3.4" fill="#f0a02e"/>
+      <circle cx="16" cy="21.5" r="3.4" fill="#1da97c"/>
+      <path d="M13.3 14.6 14.9 18.6M19.1 14.6 17.4 18.6" stroke="#c2410c" stroke-width="1.1" opacity=".4"/>
     </svg>
     <span class="brand-name">Agent Matrix</span>
     <span class="brand-sub mono">CONSOLE</span>
   </div>
-  <div class="actions" id="topActions" hidden>
-    <button class="btn text" id="btnSettings">设置</button>
-    <button class="btn text" id="btnLogout">退出</button>
+  <div class="actions" v-show="screen === 'dash'">
+    <button class="btn text" type="button" @click="openSettings">设置</button>
+    <button class="btn text" type="button" @click="logout">退出</button>
   </div>
 </header>
 
 <main id="main">
   <!-- 首次访问：初始化管理员账号 -->
-  <section id="setupView" class="auth-wrap" hidden>
-    <form id="setupForm" class="auth-card">
+  <section v-if="screen === 'setup'" class="auth-wrap">
+    <form class="auth-card" @submit.prevent="submitSetup">
       <h1 class="display">初始化管理员账号</h1>
       <p class="muted">首次访问，请设置账号和密码。这将作为后续登录的唯一凭证。</p>
       <label class="field"><span>账号</span>
-        <input id="setupUser" placeholder="2-32 位字母数字 _ . -" autocomplete="username" maxlength="32" required>
+        <input v-model="setupForm.user" placeholder="2-32 位字母数字 _ . -" autocomplete="username" maxlength="32" required>
       </label>
       <label class="field"><span>密码</span>
-        <input type="password" id="setupPass" placeholder="至少 8 位" autocomplete="new-password" minlength="8" maxlength="128" required>
+        <input type="password" v-model="setupForm.pass" placeholder="至少 8 位" autocomplete="new-password" minlength="8" maxlength="128" required>
       </label>
       <label class="field"><span>确认密码</span>
-        <input type="password" id="setupPass2" placeholder="再输入一次" autocomplete="new-password" required>
+        <input type="password" v-model="setupForm.pass2" placeholder="再输入一次" autocomplete="new-password" required>
       </label>
       <label class="field"><span>平台地址</span>
-        <input id="setupBaseURL" placeholder="https://matrix.example.com" inputmode="url">
+        <input v-model="setupForm.baseURL" placeholder="https://matrix.example.com" inputmode="url">
       </label>
       <p class="hint">Agent 的注册与心跳请求都发往这个地址。用服务器 IP 或域名均可，之后可在「设置」里随时修改。</p>
       <button class="btn primary full" type="submit">创建并进入</button>
-      <p class="error" id="setupError" hidden></p>
+      <p class="error" v-if="setupError">{{ setupError }}</p>
     </form>
   </section>
 
   <!-- 登录 -->
-  <section id="loginView" class="auth-wrap" hidden>
-    <form id="loginForm" class="auth-card">
+  <section v-else-if="screen === 'login'" class="auth-wrap">
+    <form class="auth-card" @submit.prevent="submitLogin">
       <h1 class="display">登录</h1>
       <p class="muted">使用初始化时设置的管理员账号。</p>
-      <div id="accountFields">
-        <label class="field"><span>账号</span><input id="loginUser" autocomplete="username"></label>
-        <label class="field"><span>密码</span><input type="password" id="loginPass" autocomplete="current-password"></label>
+      <div v-show="!useTokenLogin">
+        <label class="field"><span>账号</span><input v-model="loginForm.user" autocomplete="username"></label>
+        <label class="field"><span>密码</span><input type="password" v-model="loginForm.pass" autocomplete="current-password"></label>
       </div>
-      <div id="tokenField" hidden>
-        <label class="field"><span>应急令牌</span><input type="password" id="loginToken" placeholder="AGENT_MATRIX_ADMIN_TOKEN" autocomplete="off"></label>
+      <div v-show="useTokenLogin">
+        <label class="field"><span>应急令牌</span><input type="password" v-model="loginForm.token" placeholder="AGENT_MATRIX_ADMIN_TOKEN" autocomplete="off"></label>
       </div>
       <button class="btn primary full" type="submit">登 录</button>
-      <p class="toggle" id="loginToggle" hidden><a href="#" id="loginToggleLink">改用应急令牌登录</a></p>
-      <p class="error" id="loginError" hidden></p>
+      <p class="toggle" v-if="envLogin"><a href="#" @click.prevent="toggleTokenLogin">{{ useTokenLogin ? '改用账号密码登录' : '改用应急令牌登录' }}</a></p>
+      <p class="error" v-if="loginError">{{ loginError }}</p>
     </form>
   </section>
 
   <!-- 控制台 -->
-  <section id="dashView" hidden>
-    <nav class="tabs" id="dashTabs" aria-label="视图切换">
-      <button class="tab active" data-view="tasks" type="button">任务</button>
-      <button class="tab" data-view="agents" type="button">Agent</button>
+  <section v-else-if="screen === 'dash'">
+    <nav class="tabs" aria-label="视图切换">
+      <button class="tab" type="button" :class="{ active: view === 'tasks' }" @click="goView('tasks')">任务</button>
+      <button class="tab" type="button" :class="{ active: view === 'agents' }" @click="goView('agents')">Agent</button>
     </nav>
 
     <!-- 任务看板（默认视图） -->
-    <div id="tasksView">
+    <div v-show="view === 'tasks'">
       <header class="view-head">
         <div>
           <h1 class="display">任务</h1>
-          <p class="stats mono" id="taskStat"></p>
+          <p class="stats mono" v-if="taskStat">{{ taskStat }}</p>
         </div>
-        <button class="btn primary" id="btnNewTask"><span class="txt-full">新建任务</span><span class="txt-short">＋ 任务</span></button>
+        <button class="btn primary" type="button" @click="openTaskNew"><span class="txt-full">新建任务</span><span class="txt-short">＋ 任务</span></button>
       </header>
 
       <!-- ≥768px：三列看板 -->
-      <div class="board" id="taskBoard">
-        <section class="board-col" data-col="active" aria-label="进行中">
-          <header class="col-head"><span class="col-label c-active">进行中</span><span class="col-count mono" id="cntActive">0</span></header>
-          <div class="col-body" id="colActive"></div>
+      <div class="board" v-show="tasks.length">
+        <section class="board-col" aria-label="进行中">
+          <header class="col-head c-active"><span class="col-dot"></span><span class="col-label">进行中</span><span class="col-count mono">{{ counts.active }}</span></header>
+          <div class="col-body">
+            <task-card v-for="(t, i) in cols.active" :key="t.id" :t="t" :i="i" :now="nowTs"
+                       :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
+          </div>
         </section>
-        <section class="board-col" data-col="done" aria-label="已完成">
-          <header class="col-head"><span class="col-label c-done">已完成</span><span class="col-count mono" id="cntDone">0</span></header>
-          <div class="col-body" id="colDone"></div>
+        <section class="board-col" aria-label="已完成">
+          <header class="col-head c-done"><span class="col-dot"></span><span class="col-label">已完成</span><span class="col-count mono">{{ counts.done }}</span></header>
+          <div class="col-body">
+            <task-card v-for="(t, i) in cols.done" :key="t.id" :t="t" :i="i" :now="nowTs"
+                       :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
+          </div>
         </section>
-        <section class="board-col" data-col="failed" aria-label="失败与取消">
-          <header class="col-head"><span class="col-label c-failed">失败/取消</span><span class="col-count mono" id="cntFailed">0</span></header>
-          <div class="col-body" id="colFailed"></div>
+        <section class="board-col" aria-label="失败与取消">
+          <header class="col-head c-failed"><span class="col-dot"></span><span class="col-label">失败/取消</span><span class="col-count mono">{{ counts.failed }}</span></header>
+          <div class="col-body">
+            <task-card v-for="(t, i) in cols.failed" :key="t.id" :t="t" :i="i" :now="nowTs"
+                       :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
+          </div>
         </section>
       </div>
 
       <!-- <768px：分段切换 + 单列 -->
-      <div class="seg" id="taskSeg" role="tablist" aria-label="按状态筛选">
-        <button class="seg-btn active" data-col="active" role="tab">进行中 <span class="mono" id="segActive">0</span></button>
-        <button class="seg-btn" data-col="done" role="tab">已完成 <span class="mono" id="segDone">0</span></button>
-        <button class="seg-btn" data-col="failed" role="tab">失败/取消 <span class="mono" id="segFailed">0</span></button>
+      <div class="seg" v-show="tasks.length" role="tablist" aria-label="按状态筛选">
+        <button class="seg-btn" type="button" role="tab" :class="{ active: seg === 'active' }" @click="seg = 'active'">进行中 <span class="mono">{{ counts.active }}</span></button>
+        <button class="seg-btn" type="button" role="tab" :class="{ active: seg === 'done' }" @click="seg = 'done'">已完成 <span class="mono">{{ counts.done }}</span></button>
+        <button class="seg-btn" type="button" role="tab" :class="{ active: seg === 'failed' }" @click="seg = 'failed'">失败/取消 <span class="mono">{{ counts.failed }}</span></button>
       </div>
-      <div class="mcol" id="taskMobile"></div>
+      <div class="mcol" v-show="tasks.length">
+        <task-card v-for="(t, i) in cols[seg]" :key="t.id" :t="t" :i="i" :now="nowTs"
+                   :enter="animEnter" :pulse="pulseIds.includes(t.id)" @open="goTask"></task-card>
+        <p class="muted small" style="padding: 18px 6px" v-if="!cols[seg].length && tasks.length">该状态下暂无任务</p>
+      </div>
 
-      <div class="empty" id="taskEmpty" hidden>
+      <div class="empty" v-if="tasksLoaded && !tasks.length">
         <h2 class="display-sm">派发你的第一个任务</h2>
         <p class="muted">写下任务内容，@ 一个或多个已接入的 Agent。它们会在一分钟内拉取到任务，执行完毕后把结果写回这里；同一任务可以随时追加指令，Agent 会在原会话里接着干。</p>
-        <button class="btn primary" id="btnNewTaskEmpty">新建任务</button>
+        <button class="btn primary" type="button" @click="openTaskNew">新建任务</button>
       </div>
     </div>
 
     <!-- Agent 看板 -->
-    <div id="agentsView" hidden>
+    <div v-show="view === 'agents'">
       <header class="view-head">
         <div>
           <h1 class="display">Agent</h1>
-          <p class="stats mono" id="agentStat"></p>
+          <p class="stats mono" v-if="agentStat">{{ agentStat }}</p>
         </div>
-        <button class="btn primary" id="btnNew"><span class="txt-full">接入新 Agent</span><span class="txt-short">＋ 接入</span></button>
+        <button class="btn primary" type="button" @click="openEnroll"><span class="txt-full">接入新 Agent</span><span class="txt-short">＋ 接入</span></button>
       </header>
 
-      <div class="agent-grid" id="agentGrid"></div>
+      <div class="agent-grid" v-if="agentsLoading">
+        <div class="acard" v-for="i in 3" :key="'sk' + i">
+          <div class="sk" style="width: 60%"></div>
+          <div class="sk" style="width: 90%; margin-top: 10px"></div>
+        </div>
+      </div>
 
-      <div class="empty" id="emptyTip" hidden>
+      <div class="agent-grid" v-else-if="agents.length">
+        <agent-card v-for="a in sortedAgents" :key="a.id" :a="a" :now="nowTs" :timeout="onlineTimeout"
+                    :last="latestByAgent[a.id] || null"
+                    @remove="removeAgent" @open-task="goTask"></agent-card>
+      </div>
+
+      <div class="empty" v-else>
         <h2 class="display-sm">从一段指令开始</h2>
         <p class="muted">生成一段接入指令，发给你任意一台机器上的 Agent，它会自己完成注册并开始上报心跳。</p>
         <ol class="steps">
@@ -140,113 +165,171 @@
           <li><b>发给 Agent</b><span>原样粘贴到它的对话窗口，等待它汇报执行结果</span></li>
           <li><b>回到这里</b><span>状态灯变绿，即接入完成</span></li>
         </ol>
-        <button class="btn primary" id="btnNewEmpty">生成接入指令</button>
+        <button class="btn primary" type="button" @click="openEnroll">生成接入指令</button>
       </div>
     </div>
   </section>
 </main>
 
 <footer class="footer">
-  <span id="ver">Agent Matrix</span>
-  <span id="footSync" class="muted"></span>
+  <span>{{ version ? 'Agent Matrix v' + version : 'Agent Matrix' }}</span>
+  <span class="sync" v-if="screen === 'dash'">
+    <span class="dot" :class="sseState === 'live' ? 'live' : 'retry'"></span>
+    <span>{{ sseState === 'live' ? '实时同步' : '连接中断，重连中' }}<template v-if="lastSyncAt"> · 更新于 {{ fmtClock(lastSyncAt) }}</template></span>
+  </span>
 </footer>
 
-<!-- 接入面板（右侧滑出） -->
-<div class="panel-mask" id="panelMask"></div>
-<aside class="slideover" id="enrollPanel" aria-label="接入新 Agent">
-  <header class="slideover-head">
-    <h2>接入新 Agent</h2>
-    <button class="btn text" id="btnClose">关闭</button>
-  </header>
-  <div class="sheet-body">
-    <div id="enrollForm">
-      <label class="field"><span>名称备注（可选）</span>
-        <input id="enrollLabel" placeholder="如 cloud-a / openclaw-1" maxlength="64">
+<template v-if="screen === 'dash'">
+  <!-- 接入面板（右侧滑出） -->
+  <div class="panel-mask" :class="{ show: !!panel }" @click="closePanels"></div>
+  <aside class="slideover" :class="{ show: panel === 'enroll' }" aria-label="接入新 Agent">
+    <header class="slideover-head">
+      <h2>接入新 Agent</h2>
+      <button class="btn text" type="button" @click="closePanels">关闭</button>
+    </header>
+    <div class="sheet-body">
+      <div v-if="!enrollPrompt">
+        <label class="field"><span>名称备注（可选）</span>
+          <input v-model="enrollLabel" ref="enrollLabel" placeholder="如 cloud-a / openclaw-1" maxlength="64">
+        </label>
+        <button class="btn primary full" type="button" :disabled="enrolling" @click="genEnrollment">{{ enrolling ? '生成中…' : '生成接入指令' }}</button>
+      </div>
+      <div v-else>
+        <p class="muted small">把这段指令原样发给目标 Agent。令牌 <b>24 小时内有效、只能成功使用一次</b>。</p>
+        <pre id="promptText">{{ enrollPrompt }}</pre>
+        <button class="btn primary full" type="button" @click="copyPrompt">{{ copyPromptLabel }}</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 设置面板（右侧滑出） -->
+  <aside class="slideover" :class="{ show: panel === 'settings' }" aria-label="设置">
+    <header class="slideover-head">
+      <h2>设置</h2>
+      <button class="btn text" type="button" @click="closePanels">关闭</button>
+    </header>
+    <div class="sheet-body">
+      <label class="field"><span>平台地址（Base URL）</span>
+        <input v-model="settings.base_url" placeholder="https://matrix.example.com" inputmode="url">
       </label>
-      <button class="btn primary full" id="btnGen">生成接入指令</button>
+      <p class="hint">Agent 的注册与心跳请求都发往这个地址，新生成的接入指令立即生效。<br>注意：已接入 Agent 的心跳地址在首次注册时已写入其本地配置，改地址后需要重新接入。</p>
+      <label class="field"><span>轮询间隔（秒）</span>
+        <input v-model="settings.poll_interval" type="number" min="10" max="3600" step="1" placeholder="60" inputmode="numeric">
+      </label>
+      <p class="hint">Agent 心跳与任务拉取的频率，全局生效，10-3600 秒。改动随心跳下发，各实例一分钟内自动重装本机定时任务，无需重新接入。cron 环境的机器只支持分钟粒度，会自动向下取整。</p>
+      <button class="btn primary full" type="button" @click="saveSettings">保存</button>
+      <p class="ok" v-if="settingsSaved">已保存</p>
+      <div class="divider"></div>
+      <p class="muted small mono">Agent Matrix v{{ version }}</p>
     </div>
-    <div id="enrollResult" hidden>
-      <p class="muted small">把这段指令原样发给目标 Agent。令牌 <b>24 小时内有效、只能成功使用一次</b>。</p>
-      <pre id="promptText"></pre>
-      <button class="btn primary full" id="btnCopy">复制指令</button>
-    </div>
-  </div>
-</aside>
+  </aside>
 
-<!-- 设置面板（右侧滑出） -->
-<aside class="slideover" id="settingsPanel" aria-label="设置">
-  <header class="slideover-head">
-    <h2>设置</h2>
-    <button class="btn text" id="btnSettingsClose">关闭</button>
-  </header>
-  <div class="sheet-body">
-    <label class="field"><span>平台地址（Base URL）</span>
-      <input id="setBaseURL" placeholder="https://matrix.example.com" inputmode="url">
-    </label>
-    <p class="hint">Agent 的注册与心跳请求都发往这个地址，新生成的接入指令立即生效。<br>注意：已接入 Agent 的心跳地址在首次注册时已写入其本地配置，改地址后需要重新接入。</p>
-    <label class="field"><span>轮询间隔（秒）</span>
-      <input id="setPollInterval" type="number" min="10" max="3600" step="1" placeholder="60" inputmode="numeric">
-    </label>
-    <p class="hint">Agent 心跳与任务拉取的频率，全局生效，10-3600 秒。改动随心跳下发，各实例一分钟内自动重装本机定时任务，无需重新接入。cron 环境的机器只支持分钟粒度，会自动向下取整。</p>
-    <button class="btn primary full" id="btnSaveSettings">保存</button>
-    <p class="ok" id="settingsSaved" hidden>已保存</p>
-    <div class="divider"></div>
-    <p class="muted small mono" id="settingsVer"></p>
-  </div>
-</aside>
+  <!-- 新建任务（右侧滑出，宽版：内容/附件/指派一次铺开） -->
+  <aside class="slideover wide" :class="{ show: panel === 'taskNew' }" aria-label="新建任务">
+    <header class="slideover-head">
+      <h2>新建任务</h2>
+      <button class="btn text" type="button" @click="closePanels">关闭</button>
+    </header>
+    <div class="sheet-body">
+      <label class="field"><span>标题</span>
+        <input v-model="newTask.title" ref="taskTitle" placeholder="一句话概括任务" maxlength="120">
+      </label>
+      <label class="field"><span>任务内容</span>
+        <textarea v-model="newTask.content" rows="12" placeholder="写给 Agent 的完整指令。它会原样收到这段文本，执行后把结果写回。"></textarea>
+      </label>
+      <div class="field"><span>附件（可选，最多 10 个，单个 ≤100MB）</span>
+        <div class="att-row" v-for="(p, i) in pendingAtts" :key="p.file.name + '_' + p.file.size + '_' + i">
+          <span class="att-name" :title="p.file.name">{{ p.file.name }}（{{ fmtSize(p.file.size) }}）</span>
+          <input class="att-desc" v-model="p.desc" placeholder="说明（可选）：这是什么、要重点关注什么" maxlength="300">
+          <button class="btn text att-rm" type="button" @click="pendingAtts.splice(i, 1)">移除</button>
+        </div>
+        <input type="file" ref="attFile" hidden multiple @change="onAttPicked">
+        <button class="btn text" type="button" @click="$refs.attFile.click()">＋ 添加附件</button>
+        <p class="hint">可为每个附件填一句说明，Agent 会按「附件1、附件2…」编号收到文件与说明。</p>
+      </div>
+      <div class="field"><span>指派给（可多选，离线的上线后也会收到）</span>
+        <div class="picker">
+          <label class="pick" v-for="a in agents" :key="a.id" :class="{ on: newTaskChecked.includes(a.id) }">
+            <input type="checkbox" v-model="newTaskChecked" :value="a.id">
+            <span class="dot" :class="isOnline(a) ? 'on' : 'off'"></span>
+            <span>{{ a.name }}<template v-if="!isOnline(a)">（离线）</template></span>
+          </label>
+          <p class="muted small" v-if="!agents.length">还没有已接入的 Agent，请先在「Agent」页接入。</p>
+        </div>
+      </div>
+      <button class="btn primary full" type="button" :disabled="creating" @click="createTask">{{ createLabel }}</button>
+      <p class="error" v-if="taskNewError">{{ taskNewError }}</p>
+    </div>
+  </aside>
 
-<!-- 新建任务（右侧滑出，宽版：内容/附件/指派一次铺开） -->
-<aside class="slideover wide" id="taskNewPanel" aria-label="新建任务">
-  <header class="slideover-head">
-    <h2>新建任务</h2>
-    <button class="btn text" id="btnTaskNewClose">关闭</button>
-  </header>
-  <div class="sheet-body">
-    <label class="field"><span>标题</span>
-      <input id="taskTitle" placeholder="一句话概括任务" maxlength="120">
-    </label>
-    <label class="field"><span>任务内容</span>
-      <textarea id="taskContent" rows="12" placeholder="写给 Agent 的完整指令。它会原样收到这段文本，执行后把结果写回。"></textarea>
-    </label>
-    <div class="field"><span>附件（可选，最多 10 个，单个 ≤100MB）</span>
-      <div id="attList"></div>
-      <input type="file" id="attFile" hidden multiple>
-      <button class="btn text" id="btnAddAtt" type="button">＋ 添加附件</button>
-      <p class="hint">可为每个附件填一句说明，Agent 会按「附件1、附件2…」编号收到文件与说明。</p>
+  <!-- 任务详情（右侧滑出，宽版：对话线程 + 继续任务） -->
+  <aside class="slideover wide" :class="{ show: panel === 'taskDetail' }" aria-label="任务详情">
+    <header class="slideover-head">
+      <h2>{{ detail ? detail.task.title : '任务详情' }}</h2>
+      <button class="btn text" type="button" @click="closePanels">关闭</button>
+    </header>
+    <div class="sheet-body" ref="tdBody" v-if="detail">
+      <p class="task-meta">
+        <span class="pill" :class="taskPill(detail.status)[1]">{{ taskPill(detail.status)[0] }}</span>
+        <span class="mono muted small">{{ detail.task.id }}</span>
+        <span class="muted small">创建于 {{ fmtTime(detail.task.created_at) }}<template v-if="detail.task.canceled_at">，取消于 {{ fmtTime(detail.task.canceled_at) }}</template></span>
+      </p>
+      <div>
+        <div class="round" v-for="r in rounds" :key="r.seq">
+          <div class="round-label">{{ rounds.length > 1 ? '第 ' + r.seq + ' 轮 / 共 ' + rounds.length + ' 轮' : '任务指令' }}</div>
+          <div class="instr"><span class="who">你 · {{ fmtTime(r.items[0].created_at || detail.task.created_at) }}</span>{{ r.items[0].content }}</div>
+          <template v-if="r.seq === 1">
+            <att-item v-for="(att, i) in detail.inputs" :key="att.id" :att="att" :idx="i + 1"></att-item>
+          </template>
+          <div class="asgn" v-for="a in r.items" :key="a.id" :class="'st-' + a.status">
+            <div class="asgn-head">
+              <span class="dot" :class="dotClass(a.status)"></span>
+              <span class="asgn-name">{{ a.agent_name }}<template v-if="!a.online">（离线）</template></span>
+              <span class="pill" :class="asgPill(a.status)[1]">{{ asgPill(a.status)[0] }}</span>
+              <span class="pill amber" v-if="a.stale">疑似卡住</span>
+            </div>
+            <p class="sub small">{{ asgTimes(a) }}</p>
+            <button class="btn text" type="button" v-if="a.status === 'delivered'" @click="requeue(a)">重新投递</button>
+            <template v-if="a.result && a.result !== '…'">
+              <pre class="result-view">{{ a.result }}</pre>
+              <div class="result-bar">
+                <button class="btn text" type="button" @click="copyResult(a)">{{ copiedAsgId === a.id ? copiedAsgLabel : '复制结果' }}</button>
+              </div>
+            </template>
+            <template v-if="outputsOf(a.id).length">
+              <p class="sub small att-out-head">产出文件（{{ outputsOf(a.id).length }}）</p>
+              <att-item v-for="o in outputsOf(a.id)" :key="o.id" :att="o" :idx="null"></att-item>
+            </template>
+          </div>
+        </div>
+      </div>
+      <div class="danger-zone">
+        <button class="btn danger-ghost" type="button" v-if="!detailTerminal" @click="cancelTask">取消任务</button>
+        <button class="btn danger-ghost" type="button" @click="deleteTask">删除任务</button>
+      </div>
     </div>
-    <div class="field"><span>指派给（可多选，离线的上线后也会收到）</span>
-      <div class="picker" id="agentPicker"></div>
+    <div class="composer" v-if="detail && !detail.task.canceled_at">
+      <textarea v-model="fuContent" rows="3" placeholder="继续这个任务：追加的指令会发给勾选的 Agent，在原会话里接着执行（同任务同会话，上下文连续）。"></textarea>
+      <div class="composer-foot">
+        <div class="picker compact">
+          <label class="pick" v-for="a in agents" :key="a.id" :class="{ on: fuChecked.includes(a.id) }">
+            <input type="checkbox" v-model="fuChecked" :value="a.id">
+            <span class="dot" :class="isOnline(a) ? 'on' : 'off'"></span>
+            <span>{{ a.name }}<template v-if="!isOnline(a)">（离线）</template></span>
+          </label>
+          <span class="muted small" v-if="!agents.length">无可用 Agent</span>
+        </div>
+        <button class="btn primary" type="button" :disabled="fuSending" @click="followup">{{ fuSending ? '发送中…' : '发送' }}</button>
+      </div>
+      <p class="error" v-if="fuError">{{ fuError }}</p>
     </div>
-    <button class="btn primary full" id="btnCreateTask">创建任务</button>
-    <p class="error" id="taskNewError" hidden></p>
-  </div>
-</aside>
+  </aside>
+</template>
 
-<!-- 任务详情（右侧滑出，宽版：对话线程 + 继续任务） -->
-<aside class="slideover wide" id="taskDetailPanel" aria-label="任务详情">
-  <header class="slideover-head">
-    <h2 id="tdTitle">任务详情</h2>
-    <button class="btn text" id="btnTdClose">关闭</button>
-  </header>
-  <div class="sheet-body" id="tdBody">
-    <p class="task-meta"><span id="tdStatus"></span><span class="mono muted small" id="tdId"></span><span class="muted small" id="tdTime"></span></p>
-    <div id="tdThread"></div>
-    <div class="danger-zone">
-      <button class="btn danger-ghost" id="btnCancelTask" hidden>取消任务</button>
-      <button class="btn danger-ghost" id="btnDeleteTask">删除任务</button>
-    </div>
-  </div>
-  <div class="composer" id="tdComposer">
-    <textarea id="fuContent" rows="3" placeholder="继续这个任务：追加的指令会发给勾选的 Agent，在原会话里接着执行（同任务同会话，上下文连续）。"></textarea>
-    <div class="composer-foot">
-      <div class="picker compact" id="fuPicker"></div>
-      <button class="btn primary" id="btnFollowup">发送</button>
-    </div>
-    <p class="error" id="fuError" hidden></p>
-  </div>
-</aside>
+<div class="toast" :class="{ show: toastOn }">{{ toastMsg }}</div>
+</div>
 
-<div class="toast" id="toast" hidden></div>
+<script src="/vendor/vue.global.prod.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

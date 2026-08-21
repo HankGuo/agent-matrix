@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.11.1"
+const version = "0.12.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -53,6 +53,7 @@ func main() {
 		rl:         newRateLimiter(10, time.Minute),
 		pullRl:     newRateLimiter(60, time.Minute),
 		sessionKey: sessionKey,
+		broker:     newSSEBroker(),
 	}
 
 	httpSrv := &http.Server{
@@ -95,6 +96,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("GET /api/events", s.requireAdmin(s.handleEvents))
 	mux.HandleFunc("POST /api/setup", s.handleSetup)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
