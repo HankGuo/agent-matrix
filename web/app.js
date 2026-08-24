@@ -222,6 +222,10 @@ const app = createApp({
       const c = this.cols;
       return { active: c.active.length, done: c.done.length, failed: c.failed.length };
     },
+    /* KPI 统计卡：在线 Agent 数（随 nowTick 本地重算） */
+    onlineCount() {
+      return this.agents.filter((a) => this.isOnline(a)).length;
+    },
     /* 任务流：按 taskFilter 过滤后按 created_at 倒序，分「今天 / 昨天 / 更早」，
        组内保持倒序；空组不出小节眉 */
     groupedTasks() {
@@ -247,26 +251,10 @@ const app = createApp({
       }
       return groups.filter((g) => g.items.length).map((g) => ({ ...g, note: g.items.length + " 项" }));
     },
-    /* 刊头日期：中文日期 + 星期（随 nowTick 重算） */
-    mastheadDate() {
-      const d = new Date(this.nowTs * 1000);
-      const week = "日一二三四五六"[d.getDay()];
-      return `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日 · 星期${week}`;
-    },
-    taskStat() {
-      if (!this.tasks.length) return "";
-      const n = this.counts;
-      return `${n.active} 进行中 · ${n.done} 已完成 · ${n.failed} 失败/取消，共 ${this.tasks.length} 个任务`;
-    },
     sortedAgents() {
       const on = (a) => (this.isOnline(a) ? 1 : 0);
       // 在线在前、离线沉底（sort 稳定，组内保持服务端返回顺序）
       return [...this.agents].sort((x, y) => on(y) - on(x));
-    },
-    agentStat() {
-      if (!this.agents.length) return "";
-      const online = this.agents.filter((a) => this.isOnline(a)).length;
-      return `${this.agents.length} 台已纳管 · ${online} 在线 · ${this.agents.length - online} 离线`;
     },
     /* Agent 的最近一条任务（跨任务取最新一轮指派） */
     latestByAgent() {
@@ -433,7 +421,7 @@ const app = createApp({
       this.boot();
     },
 
-    /* ---- 视图路由：#/tasks（默认）与 #/agents，支持 #/tasks/<id> 直达详情 ---- */
+    /* ---- 视图路由：#/tasks（默认）、#/agents、#/settings，支持 #/tasks/<id> 直达详情 ---- */
     onHash() {
       if (this.screen === "dash") this.applyHash();
     },
@@ -445,7 +433,8 @@ const app = createApp({
     applyHash() {
       const h = location.hash;
       const m = h.match(/^#\/tasks\/(tsk_[0-9a-f]+)$/);
-      this.view = h.startsWith("#/agents") ? "agents" : "tasks";
+      this.view = h.startsWith("#/agents") ? "agents" : h.startsWith("#/settings") ? "settings" : "tasks";
+      if (this.view === "settings") this.loadSettings();
       if (m) {
         // 防止 openTaskDetail 内部补写 hash 造成的重入
         if (m[1] !== this.currentTaskId || this.panel !== "taskDetail") this.openTaskDetail(m[1]);
@@ -566,8 +555,8 @@ const app = createApp({
       setTimeout(() => (this.copyPromptLabel = "复制指令"), 2000);
     },
 
-    /* ---- 设置面板 ---- */
-    async openSettings() {
+    /* ---- 设置视图：进入 #/settings 时拉取一次 ---- */
+    async loadSettings() {
       try {
         const res = await api("/api/settings");
         if (res.ok) {
@@ -578,7 +567,6 @@ const app = createApp({
         }
       } catch { /* 保持旧值 */ }
       this.settingsSaved = false;
-      this.panel = "settings";
     },
 
     async saveSettings() {
