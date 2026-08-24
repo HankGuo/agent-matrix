@@ -321,19 +321,35 @@
           <template v-if="r.seq === 1">
             <att-item v-for="(att, i) in detail.inputs" :key="att.id" :att="att" :idx="i + 1"></att-item>
           </template>
-          <div class="asgn" v-for="a in r.items" :key="a.id" :class="'st-' + a.status">
-            <div class="asgn-head">
-              <span class="dot" :class="a.online ? 'on' : 'off'" :title="a.online ? 'Agent 在线' : 'Agent 离线'"></span>
-              <span class="asgn-name">{{ a.agent_name }}<template v-if="!a.online">（离线）</template></span>
+          <!-- 并行 Agent 结果：tab 切换（纵向=轮次，横向=Agent），不再纵向堆叠长结果 -->
+          <div class="atabs" role="tablist">
+            <button class="atab" type="button" role="tab" v-for="a in r.items" :key="a.id"
+                    :class="{ on: asgTab(r) === a.id }" :aria-selected="asgTab(r) === a.id"
+                    :title="a.agent_name + ' · ' + asgPill(a.status)[0]"
+                    @click="setAsgTab(r.seq, a.id)">
+              <span class="dot" :class="a.online ? 'on' : 'off'"></span>
+              <span class="atab-name">{{ a.agent_name }}</span>
               <span class="stag" :class="'stag-' + asgPill(a.status)[1]">{{ asgPill(a.status)[0] }}</span>
-              <span class="stag stag-amber" v-if="a.stale">疑似卡住</span>
+              <span class="stag stag-amber" v-if="a.stale">卡住</span>
+            </button>
+          </div>
+          <div class="asgn" v-for="a in r.items" :key="a.id" v-show="asgTab(r) === a.id" :class="'st-' + a.status">
+            <div class="asgn-subbar">
+              <p class="sub small">{{ asgTimes(a) }}</p>
+              <button class="btn text" type="button" v-if="a.status === 'delivered'" @click="requeue(a)">重新投递</button>
             </div>
-            <p class="sub small">{{ asgTimes(a) }}</p>
-            <button class="btn text" type="button" v-if="a.status === 'delivered'" @click="requeue(a)">重新投递</button>
             <template v-if="a.result && a.result !== '…'">
-              <pre class="result-view">{{ a.result }}</pre>
-              <div class="result-bar">
-                <button class="btn text" type="button" @click="copyResult(a)">{{ copiedAsgId === a.id ? copiedAsgLabel : '复制结果' }}</button>
+              <div class="result-box">
+                <div class="result-head">
+                  <span class="seg" v-if="resultKind(a.result) !== 'text'">
+                    <button class="seg-btn" type="button" :class="{ on: resultViewOf(a) === 'rich' }" @click="setResultView(a, 'rich')">预览</button>
+                    <button class="seg-btn" type="button" :class="{ on: resultViewOf(a) === 'raw' }" @click="setResultView(a, 'raw')">原文</button>
+                  </span>
+                  <span class="result-h" v-else>执行结果</span>
+                  <button class="btn text sm" type="button" @click="copyResult(a)">{{ copiedAsgId === a.id ? copiedAsgLabel : '复制结果' }}</button>
+                </div>
+                <div v-if="resultViewOf(a) === 'rich'" class="result-view md-body" v-html="richHtml(a)"></div>
+                <pre v-else class="result-view">{{ a.result }}</pre>
               </div>
             </template>
             <template v-if="outputsOf(a.id).length">
@@ -370,6 +386,8 @@
 </div>
 
 <script src="/vendor/vue.global.prod.js"></script>
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

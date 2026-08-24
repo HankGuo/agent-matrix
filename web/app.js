@@ -116,6 +116,39 @@ async function copyText(text) {
   return ok;
 }
 
+/* ---- 结果富文本渲染：md/html 嗅探 + DOMPurify 消毒（Agent 返回不可信，禁裸 v-html） ---- */
+if (window.DOMPurify) {
+  // 渲染结果中的链接一律新窗口打开，避免把控制台导航走
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.tagName === "A") {
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener");
+    }
+  });
+}
+
+/* 嗅探结果形态：html 文档/片段、markdown、纯文本（纯文本只给原文） */
+function resultKindOf(t) {
+  if (!t) return "text";
+  if (/^\s*(<!doctype\s+html|<html[\s>])/i.test(t)) return "html";
+  const blockTags = (t.match(/<\/?(div|table|section|article|ul|ol|p|h[1-6]|pre|blockquote)\b[^>]*>/gi) || []).length;
+  if (blockTags >= 3) return "html";
+  if (/```|(^|\n)#{1,6}\s+\S|(^|\n)\s*[-*+]\s+\S|(^|\n)\s*\d+\.\s+\S|\[[^\]\n]+\]\([^)\n]+\)/.test(t)) return "md";
+  return "text";
+}
+
+/* asgId → { src, html } 缓存，SSE 刷新重渲染时内容没变就复用 */
+const richCache = new Map();
+function renderRich(t) {
+  if (!window.marked || !window.DOMPurify) return "";
+  try {
+    const raw = resultKindOf(t) === "html" ? t : marked.parse(t, { breaks: true });
+    return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } });
+  } catch {
+    return "";
+  }
+}
+
 /* ---------- API：401 一律回到 boot 重新探测会话 ---------- */
 let appVm = null;
 async function api(path, opts = {}) {
@@ -179,6 +212,8 @@ const app = createApp({
       creating: false,
       currentTaskId: "",
       detail: null, // { task, status, assignments, outputs, inputs }
+      asgTabs: {}, // 轮次 seq → 选中的指派 id（详情内 Agent 结果 tab）
+      resultView: {}, // 指派 id → "rich" | "raw"（结果预览/原文切换）
       fuChecked: [],
       fuContent: "",
       fuError: "",
@@ -667,6 +702,8 @@ const app = createApp({
       this.fuContent = fuDrafts.get(id) || "";
       this.fuError = "";
       this.currentTaskId = id;
+      this.asgTabs = {}; // 换任务时 tab 与视图偏好一并复位
+      this.resultView = {};
       // 继续任务的选择器：默认勾选任务当前名单
       const inTask = new Set((d.assignments || []).map((a) => a.agent_id));
       this.fuChecked = this.agents.filter((a) => inTask.has(a.id)).map((a) => a.id);
@@ -696,6 +733,30 @@ const app = createApp({
           });
         }
       } catch { /* 忽略 */ }
+    },
+
+    /* ---- 详情：Agent 结果 tab 与 预览/原文 切换 ---- */
+    asgTab(r) {
+      const sel = this.asgTabs[r.seq];
+      if (sel && r.items.some((a) => a.id === sel)) return sel;
+      return r.items.length ? r.items[0].id : "";
+    },
+    setAsgTab(seq, id) {
+      this.asgTabs = { ...this.asgTabs, [seq]: id };
+    },
+    resultKind: resultKindOf,
+    resultViewOf(a) {
+      return this.resultView[a.id] || (resultKindOf(a.result) === "text" ? "raw" : "rich");
+    },
+    setResultView(a, v) {
+      this.resultView = { ...this.resultView, [a.id]: v };
+    },
+    richHtml(a) {
+      const c = richCache.get(a.id);
+      if (c && c.src === a.result) return c.html;
+      const html = renderRich(a.result);
+      richCache.set(a.id, { src: a.result, html });
+      return html;
     },
 
     outputsOf(asgID) {
