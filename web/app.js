@@ -57,22 +57,6 @@ const asgStatusMeta = {
 function taskPill(s) { return taskStatusMeta[s] || ["?", "gray"]; }
 function asgPill(s) { return asgStatusMeta[s] || [s || "?", "gray"]; }
 
-/* 指派状态对应的语义灯 */
-function dotClass(status) {
-  if (status === "done") return "on";
-  if (status === "delivered") return "pulse";
-  if (status === "failed") return "bad";
-  return "off";
-}
-
-/* 任务状态对应的语义灯 */
-function taskDot(s) {
-  if (s === "done") return "on";
-  if (s === "running" || s === "partial") return "pulse";
-  if (s === "failed") return "bad";
-  return "off"; // pending / canceled
-}
-
 /* 任务卡的最近活动时间 */
 function taskActivity(t) {
   let ts = t.created_at;
@@ -300,7 +284,7 @@ const app = createApp({
     this.boot();
   },
   methods: {
-    fmtTime, fmtClock, fmtMD, fmtSize, taskPill, asgPill, dotClass, taskDot,
+    fmtTime, fmtClock, fmtMD, fmtSize, taskPill, asgPill,
     relTime(ts) { return relTime(ts, this.nowTs); },
     isOnline(a) { return this.nowTs - a.last_seen <= this.onlineTimeout; },
 
@@ -830,11 +814,11 @@ const app = createApp({
   },
 });
 
-/* ---- 任务编辑行 ---- */
+/* ---- 任务行 ---- */
 app.component("task-card", {
   props: ["t", "i", "now", "enter", "pulse"],
   emits: ["open"],
-  methods: { taskPill, asgPill, dotClass, taskDot, fmtMD, latestPerAgent, maxSeq, taskActivity, relTime },
+  methods: { taskPill, asgPill, fmtMD, latestPerAgent, maxSeq, taskActivity, relTime },
   template: `
   <article class="trow" :class="['st-' + t.status, { enter: enter, pulsing: pulse }]" :style="{ '--i': i }" @click="$emit('open', t.id)">
     <div class="trow-main">
@@ -842,30 +826,30 @@ app.component("task-card", {
       <div class="trow-meta">
         <span class="tchip" v-for="a in latestPerAgent(t)" :key="a.id"
               :title="a.agent_name + ' · ' + asgPill(a.status)[0] + (a.stale ? ' · 疑似卡住' : '')">
-          <span class="dot" :class="dotClass(a.status)"></span><span class="tchip-name">@{{ a.agent_name }}</span>
+          <span class="tchip-name">@{{ a.agent_name }}</span><span class="tchip-stale" v-if="a.stale">卡住</span>
         </span>
         <span class="trow-seq mono" v-if="maxSeq(t) > 1">第 {{ maxSeq(t) }} 轮</span>
         <span class="trow-rel mono">{{ relTime(taskActivity(t), now) }}</span>
       </div>
     </div>
     <div class="trow-side">
-      <span class="trow-status">
-        <span class="dot" :class="taskDot(t.status)"></span>
-        <span class="st-label" :class="'stc-' + taskPill(t.status)[1]">{{ taskPill(t.status)[0] }}</span>
-      </span>
+      <span class="stag" :class="'stag-' + taskPill(t.status)[1]">{{ taskPill(t.status)[0] }}</span>
       <span class="trow-time mono">{{ fmtMD(taskActivity(t)) }}</span>
     </div>
   </article>`,
 });
 
-/* ---- Agent 编辑行 ---- */
+/* ---- Agent 行 ---- */
 app.component("agent-card", {
   props: ["a", "now", "timeout", "last"],
   emits: ["remove", "open-task"],
+  data() {
+    return { menuOpen: false };
+  },
   computed: {
     meta() {
       // 能力画像（注册/升级时 Agent 自报的 meta JSON），容错解析
-      try { return JSON.parse(this.a.meta || "{}"); } catch { return {}; }
+      try { return JSON.parse(this.a.meta || "{}") } catch { return {}; }
     },
     online() { return this.now - this.a.last_seen <= this.timeout; },
     execTag() {
@@ -880,10 +864,10 @@ app.component("agent-card", {
     },
     heartbeat() { return relTime(this.a.last_seen, this.now); },
   },
-  methods: { dotClass },
+  methods: { asgPill },
   template: `
   <div class="arow" :class="{ off: !online }">
-    <span class="dot arow-dot" :class="online ? 'on' : 'off'"></span>
+    <span class="dot arow-dot" :class="online ? 'on' : 'off'" :title="online ? '在线' : '离线'"></span>
     <div class="arow-main">
       <div class="arow-top">
         <span class="arow-name" :title="a.name">{{ a.name }}</span>
@@ -895,14 +879,24 @@ app.component("agent-card", {
       </div>
     </div>
     <div class="arow-task" v-if="last" :title="'最近任务：' + last.task.title" @click="$emit('open-task', last.task.id)">
-      <span class="dot" :class="dotClass(last.asg.status)"></span>
+      <span class="stag" :class="'stag-' + asgPill(last.asg.status)[1]">{{ asgPill(last.asg.status)[0] }}</span>
       <span class="t">{{ last.task.title }}</span>
       <span class="arow-time mono">{{ lastTime }}</span>
     </div>
     <div class="arow-task none" v-else><span class="muted">暂无任务</span></div>
     <div class="arow-side">
       <span class="arow-hb mono" :title="'最后心跳 ' + heartbeat">{{ heartbeat }}</span>
-      <button class="btn text arow-del" type="button" @click="$emit('remove', a)">下线</button>
+      <div class="menu-wrap">
+        <button class="icon-btn" type="button" aria-label="更多操作" :aria-expanded="menuOpen" @click.stop="menuOpen = !menuOpen">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <div class="menu-mask" v-if="menuOpen" @click="menuOpen = false"></div>
+        <div class="menu" v-if="menuOpen">
+          <button class="menu-item danger" type="button" @click="menuOpen = false; $emit('remove', a)">下线 Agent</button>
+        </div>
+      </div>
     </div>
   </div>`,
 });

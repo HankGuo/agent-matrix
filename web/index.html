@@ -93,23 +93,23 @@
     <!-- KPI 统计卡（任务视图） -->
     <div class="stats" v-show="view === 'tasks'">
       <div class="stat-card">
-        <p class="stat-label"><span class="dot ink"></span>累计任务</p>
+        <p class="stat-label">累计任务</p>
         <p class="stat-num mono">{{ tasks.length }}</p>
       </div>
       <div class="stat-card">
-        <p class="stat-label"><span class="dot amb"></span>进行中</p>
-        <p class="stat-num mono">{{ counts.active }}</p>
+        <p class="stat-label">进行中</p>
+        <p class="stat-num mono st-amber-t">{{ counts.active }}</p>
       </div>
       <div class="stat-card">
-        <p class="stat-label"><span class="dot on"></span>已完成</p>
-        <p class="stat-num mono">{{ counts.done }}</p>
+        <p class="stat-label">已完成</p>
+        <p class="stat-num mono st-green-t">{{ counts.done }}</p>
       </div>
       <div class="stat-card">
-        <p class="stat-label"><span class="dot bad"></span>失败 / 取消</p>
-        <p class="stat-num mono">{{ counts.failed }}</p>
+        <p class="stat-label">失败 / 取消</p>
+        <p class="stat-num mono st-rose-t">{{ counts.failed }}</p>
       </div>
       <div class="stat-card">
-        <p class="stat-label"><span class="dot on"></span>在线 Agent</p>
+        <p class="stat-label">在线 Agent</p>
         <p class="stat-num mono">{{ onlineCount }}<span class="stat-sub">/ {{ agents.length }} 台</span></p>
       </div>
     </div>
@@ -182,24 +182,52 @@
       </div>
     </section>
 
-    <!-- 设置视图 -->
-    <section class="panel settings-panel" v-show="view === 'settings'">
+    <!-- 设置视图：全宽面板 + 左标签说明 / 右控件（AntD Pro 基本设置式） -->
+    <section class="panel" v-show="view === 'settings'">
       <div class="panel-head">
         <h2 class="panel-title">设置</h2>
       </div>
       <div class="panel-body settings-body">
-        <label class="field"><span>平台地址（Base URL）</span>
-          <input v-model="settings.base_url" placeholder="https://matrix.example.com" inputmode="url">
-        </label>
-        <p class="hint">Agent 的注册与心跳请求都发往这个地址，新生成的接入指令立即生效。<br>注意：已接入 Agent 的心跳地址在首次注册时已写入其本地配置，改地址后需要重新接入。</p>
-        <label class="field"><span>轮询间隔（秒）</span>
-          <input v-model="settings.poll_interval" type="number" min="10" max="3600" step="1" placeholder="60" inputmode="numeric">
-        </label>
-        <p class="hint">Agent 心跳与任务拉取的频率，全局生效，10-3600 秒。改动随心跳下发，各实例一分钟内自动重装本机定时任务，无需重新接入。cron 环境的机器只支持分钟粒度，会自动向下取整。</p>
-        <button class="btn primary" type="button" @click="saveSettings">保存</button>
-        <p class="ok" v-if="settingsSaved">已保存</p>
-        <div class="divider"></div>
-        <p class="muted small mono">Agent Matrix v{{ version }}</p>
+        <h3 class="set-h">基本设置</h3>
+        <div class="srow">
+          <div class="srow-label">
+            <b>平台地址（Base URL）</b>
+            <p class="hint">Agent 的注册与心跳请求都发往这个地址，新生成的接入指令立即生效。已接入 Agent 的心跳地址在首次注册时已写入其本地配置，改地址后需要重新接入。</p>
+          </div>
+          <div class="srow-ctl">
+            <input v-model="settings.base_url" placeholder="https://matrix.example.com" inputmode="url">
+          </div>
+        </div>
+        <div class="srow">
+          <div class="srow-label">
+            <b>轮询间隔（秒）</b>
+            <p class="hint">Agent 心跳与任务拉取的频率，全局生效，10-3600 秒。改动随心跳下发，各实例一分钟内自动重装本机定时任务，无需重新接入。cron 环境的机器只支持分钟粒度，会自动向下取整。</p>
+          </div>
+          <div class="srow-ctl">
+            <input class="w-xs" v-model="settings.poll_interval" type="number" min="10" max="3600" step="1" placeholder="60" inputmode="numeric">
+          </div>
+        </div>
+        <div class="srow">
+          <div class="srow-label"></div>
+          <div class="srow-ctl">
+            <button class="btn primary" type="button" @click="saveSettings">保存</button>
+            <span class="ok inline-ok" v-if="settingsSaved">已保存</span>
+          </div>
+        </div>
+        <h3 class="set-h">运行信息</h3>
+        <div class="srow">
+          <div class="srow-label"><b>版本</b></div>
+          <div class="srow-ctl"><span class="mono">Agent Matrix v{{ version }}</span></div>
+        </div>
+        <div class="srow">
+          <div class="srow-label"><b>实时同步</b></div>
+          <div class="srow-ctl">
+            <span class="sync">
+              <span class="dot" :class="sseState === 'live' ? 'live' : 'retry'"></span>
+              <span>{{ sseState === 'live' ? '已连接，任务与 Agent 变更实时推送' : '连接中断，重连中' }}</span>
+            </span>
+          </div>
+        </div>
       </div>
     </section>
   </section>
@@ -282,10 +310,7 @@
     </header>
     <div class="sheet-body" ref="tdBody" v-if="detail">
       <p class="task-meta">
-        <span class="trow-status">
-          <span class="dot" :class="taskDot(detail.status)"></span>
-          <span class="st-label" :class="'stc-' + taskPill(detail.status)[1]">{{ taskPill(detail.status)[0] }}</span>
-        </span>
+        <span class="stag" :class="'stag-' + taskPill(detail.status)[1]">{{ taskPill(detail.status)[0] }}</span>
         <span class="mono muted small">{{ detail.task.id }}</span>
         <span class="muted small">创建于 {{ fmtTime(detail.task.created_at) }}<template v-if="detail.task.canceled_at">，取消于 {{ fmtTime(detail.task.canceled_at) }}</template></span>
       </p>
@@ -298,10 +323,10 @@
           </template>
           <div class="asgn" v-for="a in r.items" :key="a.id" :class="'st-' + a.status">
             <div class="asgn-head">
-              <span class="dot" :class="dotClass(a.status)"></span>
+              <span class="dot" :class="a.online ? 'on' : 'off'" :title="a.online ? 'Agent 在线' : 'Agent 离线'"></span>
               <span class="asgn-name">{{ a.agent_name }}<template v-if="!a.online">（离线）</template></span>
-              <span class="st-label" :class="'stc-' + asgPill(a.status)[1]">{{ asgPill(a.status)[0] }}</span>
-              <span class="st-label stc-amber" v-if="a.stale">疑似卡住</span>
+              <span class="stag" :class="'stag-' + asgPill(a.status)[1]">{{ asgPill(a.status)[0] }}</span>
+              <span class="stag stag-amber" v-if="a.stale">疑似卡住</span>
             </div>
             <p class="sub small">{{ asgTimes(a) }}</p>
             <button class="btn text" type="button" v-if="a.status === 'delivered'" @click="requeue(a)">重新投递</button>
