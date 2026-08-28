@@ -1,0 +1,28 @@
+# Agent Matrix 容器化部署示例
+#   docker compose up -d
+# 数据全部落在 ./data（SQLite 库 + 附件），备份直接拷贝该目录
+# （建议先 docker compose stop 或备份 db + db-wal + db-shm 三个文件）。
+services:
+  agent-matrix:
+    build: .
+    # 也可直接用镜像：image: ghcr.io/hankguo/agent-matrix:latest
+    container_name: agent-matrix
+    restart: unless-stopped
+    # 默认只绑本机回环，交给宿主机反代（Caddy/Nginx）做 HTTPS；
+    # 要直接对外暴露就把 127.0.0.1: 前缀去掉
+    ports:
+      - "127.0.0.1:26817:26817"
+    environment:
+      # 对外访问地址，写入接入指令（也可登录后在 WebUI「设置」里改）
+      AGENT_MATRIX_BASE_URL: https://matrix.example.com
+      # 可选：应急登录令牌（忘记密码时用）；不设则只有账号密码一条路
+      # AGENT_MATRIX_ADMIN_TOKEN: change-me-to-a-long-random-string
+      # 时区影响 WebUI 时间显示
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

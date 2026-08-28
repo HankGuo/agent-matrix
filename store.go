@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -26,7 +29,32 @@ type Agent struct {
 
 type store struct{ db *sql.DB }
 
+// ensureFilePerm 确保数据库文件以 0600 存在且权限收紧。库文件含会话签名
+// 密钥与口令哈希，0644 意味着同机其他用户可离线伪造管理员会话；默认 umask
+// 下 SQLite 新建文件正是 0644，所以这里显式创建并对存量文件一并收紧。
+func ensureFilePerm(path string, perm os.FileMode) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE, perm)
+	if err != nil {
+		return err
+	}
+	f.Close()
+	if st, err := os.Stat(path); err == nil && st.Mode().Perm() != perm {
+		if err := os.Chmod(path, perm); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func openStore(path string) (*store, error) {
+	if err := ensureFilePerm(path, 0o600); err != nil {
+		return nil, fmt.Errorf("数据库文件权限初始化失败: %w", err)
+	}
 	// 用校验过的简写键而非 _pragma：驱动文档声明简写键在任何 PRAGMA 生效前先整体校验，
 	// 而 _pragma 逐条原样执行、不做校验（modernc.org/sqlite Driver.Open 文档）。
 	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=1", path)
@@ -193,7 +221,33 @@ func (s *store) sessionSecret() (string, error) {
 	return v, s.setSetting("session_secret", v)
 }
 
+// sessionEpoch 返回会话纪元（未设置时为 0）。
+func (s *store) sessionEpoch() (int64, error) {
+	v, err := s.getSetting("session_epoch")
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return 0, nil
+	}
+	return n, nil
+}
+
+// bumpSessionEpoch 会话纪元加一：所有已签发的会话 Cookie 立即失效。
+func (s *store) bumpSessionEpoch() error {
+	_, err := s.db.Exec(
+		`INSERT INTO settings (key, value) VALUES ('session_epoch', '1')
+		 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`)
+	return err
+}
+
 var errInvalidToken = errors.New("令牌无效、已使用或已过期")
+
+var errNameTaken = errors.New("登记名称已被占用")
 
 // createEnrollment 生成一次性注册令牌，明文令牌仅在创建时返回。
 func (s *store) createEnrollment(label string, ttl time.Duration) (token string, expiresAt int64, err error) {
@@ -206,33 +260,53 @@ func (s *store) createEnrollment(label string, ttl time.Duration) (token string,
 	return token, expiresAt, err
 }
 
-// consumeEnrollment 校验并原子核销一次性令牌，返回其备注名。
-func (s *store) consumeEnrollment(token string) (string, error) {
+// registerAgent 单事务完成注册全流程：原子核销一次性令牌 → 名称查重 → 创建
+// Agent。任一步失败整体回滚：名称冲突时令牌保持未使用状态（换名即可重试，
+// 不烧令牌），并发注册也不会出现「令牌已核销但 Agent 未建成」的中间态。
+func (s *store) registerAgent(token, name, hostname, osName, arch, ip, meta string) (*Agent, string, error) {
 	now := time.Now().Unix()
-	res, err := s.db.Exec(
+	a := &Agent{
+		ID:        "am_" + randHex(8),
+		Name:      name,
+		Hostname:  hostname,
+		OS:        osName,
+		Arch:      arch,
+		IP:        ip,
+		Meta:      meta,
+		CreatedAt: now,
+		LastSeen:  now,
+	}
+	raw := "amh_" + randToken(24)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`UPDATE enroll_tokens SET used_at = ?
 		 WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`,
-		now, hashToken(token), now,
-	)
+		now, hashToken(token), now)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
-		return "", errInvalidToken
+		return nil, "", errInvalidToken
 	}
-	var label string
-	err = s.db.QueryRow(`SELECT label FROM enroll_tokens WHERE token_hash = ?`, hashToken(token)).Scan(&label)
-	return label, err
-}
-
-var errNameTaken = errors.New("登记名称已被占用")
-
-// agentNameExists 报告是否已存在同名 Agent。名称全局唯一，注册前置校验，
-// 避免同名冲突时白白核销一次性令牌。
-func (s *store) agentNameExists(name string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE name = ?`, name).Scan(&n)
-	return n > 0, err
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM agents WHERE name = ?`, name).Scan(&n); err != nil {
+		return nil, "", err
+	}
+	if n > 0 {
+		return nil, "", errNameTaken
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO agents (id, name, hostname, os, arch, ip, meta, token_hash, created_at, last_seen)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.Name, a.Hostname, a.OS, a.Arch, a.IP, a.Meta, hashToken(raw), a.CreatedAt, a.LastSeen,
+	); err != nil {
+		return nil, "", err
+	}
+	return a, raw, tx.Commit()
 }
 
 // createAgent 创建 Agent 记录，返回记录与明文心跳令牌（仅此一次可见）。
@@ -548,15 +622,25 @@ func (s *store) listTasks(limit int) ([]Task, map[string][]Assignment, error) {
 		return nil, nil, err
 	}
 
-	arows, err := s.db.Query(
-		`SELECT ` + assignCols + ` FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
-		 ORDER BY a.seq, a.rowid`)
-	if err != nil {
-		return nil, nil, err
-	}
-	all, err := scanAssignments(arows)
-	if err != nil {
-		return nil, nil, err
+	// 指派只查可见任务：无 WHERE 的全表扫描会随历史任务无限增长，每次管理端
+	// 轮询都拖一遍。任务数 ≤ taskListLimit，IN 参数远在 SQLite 变量上限内。
+	var all []Assignment
+	if len(keep) > 0 {
+		q := `SELECT ` + assignCols + ` FROM task_assignments a LEFT JOIN agents g ON g.id = a.agent_id
+		      WHERE a.task_id IN (` + strings.Repeat("?,", len(keep)-1) + `?)
+		      ORDER BY a.seq, a.rowid`
+		args := make([]any, 0, len(keep))
+		for id := range keep {
+			args = append(args, id)
+		}
+		arows, err := s.db.Query(q, args...)
+		if err != nil {
+			return nil, nil, err
+		}
+		all, err = scanAssignments(arows)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	assigns := map[string][]Assignment{}
 	for _, a := range all {

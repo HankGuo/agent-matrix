@@ -166,29 +166,36 @@ Open `http://localhost:26817` (or your domain).
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | Mark offline after this long without heartbeat |
 | `AGENT_MATRIX_ATTACH_DIR` | `<DB dir>/attachments` | Attachment storage directory (mount point); back it up together with the DB |
 | `AGENT_MATRIX_ADMIN_TOKEN` | empty (optional) | Emergency login token. If set, the login page can use it instead of username+password (e.g. forgotten password); without it, account login is the only path |
+| `AGENT_MATRIX_TRUST_PROXY` | `auto` | Whether to trust `X-Forwarded-For` / `X-Forwarded-Proto` injected by a reverse proxy. `auto` = trust only when the TCP peer is loopback/private (proxy on the same host or container network); `true` = always trust; `false` = never trust. **Keep the default for direct public exposure** — client-spoofed XFF cannot bypass rate limiting; a mis-set value only causes all users behind the proxy to share one rate-limit bucket |
 
 ### Production Deployment
 
-**systemd** with `Restart=always`:
+Pick any of the three forms below; the data is one SQLite file plus one attachment directory — migration is copying the directory.
 
-```ini
-[Unit]
-Description=Agent Matrix
-After=network.target
+**Docker / Compose (Dockerfile included in the repo)**:
 
-[Service]
-Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
-Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
-ExecStart=/usr/local/bin/agent-matrix
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
+```bash
+docker compose up -d          # edit BASE_URL in docker-compose.yml first
+# or without compose:
+docker run -d --name agent-matrix --restart unless-stopped \
+  -p 26817:26817 -v am-data:/data \
+  -e AGENT_MATRIX_BASE_URL=https://matrix.example.com \
+  agent-matrix
 ```
 
-- **HTTPS reverse proxy (Caddy)**: `matrix.example.com { reverse_proxy 127.0.0.1:26817 }`; firewall everything except 443
-- **Backup**: back up the single file at `AGENT_MATRIX_DB` (contains the admin account, agent list, and session keys)
+The image runs as a non-root user and ships a `HEALTHCHECK` probing `/healthz`; the database and attachments live under `/data`, so a single volume is all you need to persist.
+
+**systemd (VPS / bare metal)**: the repo ships a sandbox-hardened unit at `deploy/agent-matrix.service` (`DynamicUser` + `ProtectSystem=strict` etc.):
+
+```bash
+sudo cp agent-matrix /usr/local/bin/
+sudo cp deploy/agent-matrix.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now agent-matrix
+```
+
+**HTTPS reverse proxy (Caddy)**: `matrix.example.com { reverse_proxy 127.0.0.1:26817 }`; firewall everything except 443. Nginx works the same; pass through `X-Forwarded-For` and `X-Forwarded-Proto` (Caddy's defaults already do) so the server can rate-limit real clients and decide Cookie `Secure`/HSTS. Plain HTTP between the proxy and Agent Matrix over loopback/private networks is the intended architecture.
+
+- **Backup**: while running, back up the WAL too — copy `db`, `db-wal`, and `db-shm` together, or stop the service first; for containers, back up the mounted volume. The DB file contains the admin account, agent list, and session keys; file permissions are enforced to 0600 automatically
 
 ---
 

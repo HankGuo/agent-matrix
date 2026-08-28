@@ -1,0 +1,50 @@
+# Agent Matrix systemd 单元（VPS / 裸机部署）
+#
+# 安装：
+#   sudo cp agent-matrix /usr/local/bin/
+#   sudo cp deploy/agent-matrix.service /etc/systemd/system/
+#   按需修改下面的 AGENT_MATRIX_BASE_URL
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agent-matrix
+#
+# 数据目录：/var/lib/agent-matrix（StateDirectory 自动创建并归属服务用户）
+# 备份：systemctl stop agent-matrix 后拷贝整个目录（或至少 db/-wal/-shm 三个文件）
+
+[Unit]
+Description=Agent Matrix 监控中心
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=agent-matrix
+Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
+Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
+# 可选：应急登录令牌
+#Environment=AGENT_MATRIX_ADMIN_TOKEN=
+ExecStart=/usr/local/bin/agent-matrix
+Restart=always
+RestartSec=3
+
+# 沙箱加固：服务仅需监听端口与写自身数据目录
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

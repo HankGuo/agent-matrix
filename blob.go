@@ -37,6 +37,12 @@ func newLocalBlob(dir string) (*localBlob, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// 清理上次进程崩溃遗留的半截临时文件（Put 用的 .tmp 命名永不与正式对象重名）
+	if stale, err := filepath.Glob(filepath.Join(dir, "*.tmp")); err == nil {
+		for _, p := range stale {
+			_ = os.Remove(p)
+		}
+	}
 	return &localBlob{dir: dir}, nil
 }
 
@@ -52,7 +58,8 @@ func (b *localBlob) Put(key string, r io.Reader) (int64, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	tmp := p + ".tmp"
+	// 临时文件名带随机后缀：并发写同 key 不互相踩踏，崩溃遗留可被启动清扫
+	tmp := p + "." + randHex(4) + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return 0, "", err

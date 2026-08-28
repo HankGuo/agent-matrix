@@ -20,8 +20,14 @@ type server struct {
 	blob       blobStore    // 附件字节存储（local 驱动）
 	rl         *rateLimiter // 登录/注册等敏感公开接口
 	pullRl     *rateLimiter // Agent 拉取任务，阈值宽松
+	agentRl    *rateLimiter // Agent 侧全部接口的 IP 级兜底限流（含无效令牌洪泛防护）
 	sessionKey string       // 会话签名密钥，持久化在 settings 表
 	broker     *sseBroker   // 管理端 SSE 实时事件分发；测试可为 nil
+}
+
+// agentRLAllow 是 agentRl 的 nil 安全入口（测试可不装配）。
+func (s *server) agentRLAllow(ip string) bool {
+	return s.agentRl == nil || s.agentRl.allow("agent:"+ip)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -43,19 +49,58 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// clientIP 优先取反代注入的 X-Forwarded-For 首段。
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, ok := strings.Cut(xff, ","); ok {
-			return strings.TrimSpace(first)
+// isTrustedProxy 判定 TCP 对端是否为可信反向代理。
+// TrustProxy=true 一律信任；=false 一律不信任；auto（默认）仅当对端是
+// 回环/内网地址时信任——直连公网（典型 VPS 裸奔部署）时 X-Forwarded-For
+// 由客户端任意伪造，绝不能采信，否则限流可被轮换伪造 IP 完全绕过。
+func (s *server) isTrustedProxy(r *http.Request) bool {
+	switch s.cfg.TrustProxy {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// clientIP 返回限流与记录用的客户端地址。仅当对端是可信反代时才采信
+// X-Forwarded-For（取最右一段：每一跳可信代理把真实对端追加到末尾，
+// 客户端自带的伪造段留在左侧）；否则用 TCP 对端地址，伪造不了。
+func (s *server) clientIP(r *http.Request) string {
+	if s.isTrustedProxy(r) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if i := strings.LastIndex(xff, ","); i >= 0 {
+				if v := strings.TrimSpace(xff[i+1:]); v != "" {
+					return v
+				}
+			}
+			if v := strings.TrimSpace(xff); v != "" {
+				return v
+			}
 		}
-		return strings.TrimSpace(xff)
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// requestIsHTTPS 判定用户侧连接是否为 HTTPS：本机 TLS，或经可信反代
+// 转发且 X-Forwarded-Proto 为 https（决定 Cookie Secure 与 HSTS）。
+func (s *server) requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return s.isTrustedProxy(r) && r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
 // clean 去掉控制字符并限制长度（按字符数截断，不会切断多字节字符）。
@@ -75,7 +120,7 @@ func clean(s string, max int) string {
 	return string(r)
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+func (s *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -83,6 +128,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		// script-src 带 unsafe-eval：Vue 3 全球构建版在浏览器内编译 in-DOM 模板依赖 new Function；
 		// 脚本本体仍仅限本站，eval 面只暴露给登录后的单管理员会话
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:")
+		// 用户侧确为 HTTPS 时才声明 HSTS：纯 HTTP 内网访问不受影响
+		if s.requestIsHTTPS(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -102,7 +151,7 @@ func (s *server) handleSetupScript(w http.ResponseWriter, _ *http.Request) {
 // ---- 公开接口（Agent 侧） ----
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if !s.rl.allow("register:" + ip) {
 		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
 		return
@@ -127,26 +176,13 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "meta 必须是 2KB 以内的 JSON 对象")
 		return
 	}
-	// 名称全局唯一：先查再核销令牌，重名时令牌保持有效，换名即可重试
-	if exists, err := s.store.agentNameExists(req.Name); err != nil {
-		log.Printf("检查名称占用失败: %v", err)
-		writeError(w, http.StatusInternalServerError, "内部错误")
-		return
-	} else if exists {
-		writeError(w, http.StatusConflict, "登记名称已被占用，请换一个 AM_NAME 重试")
-		return
-	}
-	if _, err := s.store.consumeEnrollment(req.Token); err != nil {
-		if errors.Is(err, errInvalidToken) {
-			writeError(w, http.StatusUnauthorized, "注册令牌无效、已使用或已过期")
-			return
-		}
-		log.Printf("核销注册令牌失败: %v", err)
-		writeError(w, http.StatusInternalServerError, "内部错误")
-		return
-	}
-	a, raw, err := s.store.createAgent(req.Name, req.Hostname, req.OS, req.Arch, ip, req.Meta)
+	// 单事务原子注册：核销令牌 + 名称查重 + 建 Agent。重名时整体回滚，
+	// 令牌保持有效，换名即可重试；也不会把无效令牌的存在性泄露为名称信息。
+	a, raw, err := s.store.registerAgent(req.Token, req.Name, req.Hostname, req.OS, req.Arch, ip, req.Meta)
 	switch {
+	case errors.Is(err, errInvalidToken):
+		writeError(w, http.StatusUnauthorized, "注册令牌无效、已使用或已过期")
+		return
 	case errors.Is(err, errNameTaken):
 		writeError(w, http.StatusConflict, "登记名称已被占用，请换一个 AM_NAME 重试")
 		return
@@ -166,6 +202,12 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	// IP 级兜底限流：无效令牌洪泛每次都要打一次数据库哈希查询，必须挡在门外。
+	// 阈值按「单 IP 挂满一个机群的合法心跳」预留，正常使用不受影响。
+	if !s.agentRLAllow(s.clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
+		return
+	}
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || !strings.HasPrefix(token, "amh_") {
 		writeError(w, http.StatusUnauthorized, "缺少心跳令牌")
@@ -182,7 +224,8 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var meta string
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") && r.ContentLength > 0 {
+	// ContentLength 判定用 != 0：chunked 传输时为 -1，用 > 0 会把整类请求的 meta 静默丢掉
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") && r.ContentLength != 0 {
 		var req struct {
 			Meta string `json:"meta"`
 		}
@@ -195,7 +238,7 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		meta = req.Meta
 	}
-	if err := s.store.touchHeartbeat(a.ID, clientIP(r), meta); err != nil {
+	if err := s.store.touchHeartbeat(a.ID, s.clientIP(r), meta); err != nil {
 		log.Printf("更新心跳失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -235,7 +278,9 @@ func (s *server) baseURL() string {
 	return s.cfg.BaseURL
 }
 
-// normalizeBaseURL 校验并规范化平台地址。
+// normalizeBaseURL 校验并规范化平台地址。除 URL 合法性外，拒绝空白、引号、
+// 反引号、反斜杠与控制字符——该地址会原样嵌入接入提示词、Agent 侧 shell
+// 脚本与本地 config（被 source 执行），这些字符注入后可破坏脚本甚至改写语义。
 func normalizeBaseURL(s string) (string, error) {
 	s = strings.TrimRight(strings.TrimSpace(s), "/")
 	if s == "" {
@@ -243,6 +288,11 @@ func normalizeBaseURL(s string) (string, error) {
 	}
 	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
 		return "", errors.New("平台地址必须以 http:// 或 https:// 开头")
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e || strings.ContainsRune("\"'`\\$;<>&@", r) {
+			return "", errors.New("平台地址含非法字符（空白、引号或控制字符）")
+		}
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" {
@@ -299,7 +349,7 @@ func (s *server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 // handleSetup 首次访问初始化管理员账号，仅在无任何账号时可用。
 func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if !s.rl.allow("setup:" + clientIP(r)) {
+	if !s.rl.allow("setup:" + s.clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
 		return
 	}
@@ -346,6 +396,11 @@ func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.createAdmin(req.Username, hash); err != nil {
+		// 并发初始化竞态兜底：另一个请求抢先建号时唯一键冲突，按已存在处理
+		if again, _ := s.store.hasAdmin(); again {
+			writeError(w, http.StatusForbidden, "管理员账号已存在，请直接登录")
+			return
+		}
 		log.Printf("创建管理员失败: %v", err)
 		writeError(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -356,7 +411,7 @@ func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.rl.allow("login:" + clientIP(r)) {
+	if !s.rl.allow("login:" + s.clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
 		return
 	}
@@ -387,7 +442,8 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusUnauthorized, "账号或密码错误")
 }
 
-// setSessionCookie 种下 7 天有效的会话 Cookie。
+// setSessionCookie 种下 7 天有效的会话 Cookie。Secure 按用户侧连接判定：
+// 本机 TLS 或可信反代转发 X-Forwarded-Proto: https 时启用。
 func (s *server) setSessionCookie(w http.ResponseWriter, r *http.Request) {
 	exp := time.Now().Add(sessionTTL).Unix()
 	http.SetCookie(w, &http.Cookie{
@@ -396,7 +452,7 @@ func (s *server) setSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   s.requestIsHTTPS(r),
 		Expires:  time.Unix(exp, 0),
 	})
 }
@@ -417,6 +473,11 @@ func validUsername(s string) bool {
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, _ *http.Request) {
+	// 会话撤销：递增纪元使全部已签发的会话 Cookie 立即失效（含其他浏览器
+	// 里打开的会话），再清掉本次的 Cookie。仅清 Cookie 挡不住泄露的令牌。
+	if err := s.store.bumpSessionEpoch(); err != nil {
+		log.Printf("会话纪元更新失败: %v", err)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1,
 	})

@@ -161,34 +161,41 @@ export AGENT_MATRIX_BASE_URL='https://matrix.example.com'  # 对外地址，写�
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `AGENT_MATRIX_ADDR` | `:26817` | HTTP 监听地址 |
-| `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite 数据库路径 |
+| `AGENT_MATRIX_DB` | `./agent-matrix.db` | SQLite 数据库路径（自动以 0600 权限创建，存量过宽文件启动时收紧） |
 | `AGENT_MATRIX_BASE_URL` | `http://localhost:26817` | 对外访问地址，用于生成接入指令。部署后也可在 WebUI「设置」里修改，**WebUI 设置优先于环境变量** |
 | `AGENT_MATRIX_ONLINE_TIMEOUT` | `3m` | 超过该时长无心跳判定离线 |
 | `AGENT_MATRIX_ATTACH_DIR` | `<DB目录>/attachments` | 附件存储目录（挂载点），备份时随 DB 一起拷贝 |
 | `AGENT_MATRIX_ADMIN_TOKEN` | 空（可选） | 应急登录令牌。设置后登录页可用它替代账号密码；用于忘记密码等场景，不设置则只有账号密码一条路 |
+| `AGENT_MATRIX_TRUST_PROXY` | `auto` | 是否信任反向代理注入的 `X-Forwarded-For` / `X-Forwarded-Proto`。`auto`＝仅当 TCP 对端是回环/内网地址时信任（同机或同容器网络反代）；`true`＝始终信任（反代在其它网段时用）；`false`＝绝不信任。**直连公网部署保持默认即可**——客户端伪造 XFF 无法绕过限流；该信没信的副作用只是反代后所有用户共享一个限流桶 |
 
 ### 生产部署
 
-**systemd**（`Restart=always`）：
+三种部署形态任选，数据都是一个 SQLite 文件 + 一个附件目录，迁移＝拷贝目录。
 
-```ini
-[Unit]
-Description=Agent Matrix
-After=network.target
+**Docker / Compose（仓库自带 Dockerfile）**：
 
-[Service]
-Environment=AGENT_MATRIX_BASE_URL=https://matrix.example.com
-Environment=AGENT_MATRIX_DB=/var/lib/agent-matrix/agent-matrix.db
-ExecStart=/usr/local/bin/agent-matrix
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
+```bash
+docker compose up -d          # 先把 docker-compose.yml 里的 BASE_URL 改成你的域名
+# 或不用 compose：
+docker run -d --name agent-matrix --restart unless-stopped \
+  -p 26817:26817 -v am-data:/data \
+  -e AGENT_MATRIX_BASE_URL=https://matrix.example.com \
+  agent-matrix
 ```
 
-- **HTTPS 反代（Caddy）**：`matrix.example.com { reverse_proxy 127.0.0.1:26817 }`，防火墙只放行 443
-- **备份**：备份 `AGENT_MATRIX_DB` 指向的单个文件即可（含账号、Agent 列表与会话密钥）
+镜像内以非 root 用户运行，自带 `HEALTHCHECK`（探 `/healthz`）；数据库与附件统一在 `/data`，持久化只需挂这一个卷。
+
+**systemd（VPS / 裸机）**：仓库自带带沙箱加固的单元文件 `deploy/agent-matrix.service`（`DynamicUser` + `ProtectSystem=strict` 等）：
+
+```bash
+sudo cp agent-matrix /usr/local/bin/
+sudo cp deploy/agent-matrix.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now agent-matrix
+```
+
+**HTTPS 反代（Caddy）**：`matrix.example.com { reverse_proxy 127.0.0.1:26817 }`，防火墙只放行 443。Nginx 同理；反代请透传 `X-Forwarded-For` 与 `X-Forwarded-Proto`（Caddy 默认行为即可），服务端据此识别真实客户端限流并决定 Cookie `Secure`/HSTS。反代与 Agent Matrix 之间走内网/回环 HTTP 明文属预期架构。
+
+- **备份**：服务运行中请连同 WAL 一起备份——`db`、`db-wal`、`db-shm` 三个文件一起拷，或先停服再拷目录；容器部署直接备份挂载卷。库文件含账号、Agent 列表与会话密钥，注意落盘权限（服务已自动按 0600 收紧）
 
 ---
 

@@ -87,7 +87,12 @@ func (s *server) assignmentViews(as []Assignment, withResult bool) []assignmentV
 }
 
 // agentFromRequest 按 Bearer amh_ 心跳令牌识别 Agent，失败时写入 401 并返回 nil。
+// 入口先过 IP 级兜底限流：无效令牌洪泛与恶意高频都挡在数据库查询之前。
 func (s *server) agentFromRequest(w http.ResponseWriter, r *http.Request) *Agent {
+	if !s.agentRLAllow(s.clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
+		return nil
+	}
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || !strings.HasPrefix(token, "amh_") {
 		writeError(w, http.StatusUnauthorized, "缺少心跳令牌")
@@ -315,6 +320,10 @@ func (s *server) handleListTasks(w http.ResponseWriter, _ *http.Request) {
 // handleTaskDetail 任务详情（含各指派结果全文）。
 func (s *server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !strings.HasPrefix(id, "tsk_") {
+		writeError(w, http.StatusBadRequest, "无效的任务 ID")
+		return
+	}
 	t, err := s.store.taskByID(id)
 	if errors.Is(err, errTaskNotFound) {
 		writeError(w, http.StatusNotFound, "任务不存在")
@@ -355,10 +364,15 @@ func (s *server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 
 // handleCancelTask 取消任务，未结束的指派全部置为 canceled。
 func (s *server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
-	err := s.store.cancelTask(r.PathValue("id"))
+	id := r.PathValue("id")
+	if !strings.HasPrefix(id, "tsk_") {
+		writeError(w, http.StatusBadRequest, "无效的任务 ID")
+		return
+	}
+	err := s.store.cancelTask(id)
 	switch {
 	case err == nil:
-		log.Printf("任务已取消: %s", r.PathValue("id"))
+		log.Printf("任务已取消: %s", id)
 		s.publish("tasks")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	case errors.Is(err, errTaskNotFound):
@@ -389,6 +403,10 @@ func (s *server) handleRequeueAssignment(w http.ResponseWriter, r *http.Request)
 // handleDeleteTask 删除任务：级联删除指派、附件记录与磁盘文件，历史不保留。
 func (s *server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !strings.HasPrefix(id, "tsk_") {
+		writeError(w, http.StatusBadRequest, "无效的任务 ID")
+		return
+	}
 	keys, err := s.store.deleteTask(id)
 	switch {
 	case errors.Is(err, errTaskNotFound):

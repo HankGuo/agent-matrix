@@ -16,7 +16,7 @@ import (
 )
 
 // version 随发布手动递增，展示在 WebUI 页脚与 /healthz 中。
-const version = "0.15.0"
+const version = "0.16.0"
 
 //go:embed all:web
 var webFS embed.FS
@@ -52,6 +52,7 @@ func main() {
 		blob:       blob,
 		rl:         newRateLimiter(10, time.Minute),
 		pullRl:     newRateLimiter(60, time.Minute),
+		agentRl:    newRateLimiter(600, time.Minute), // Agent 侧 IP 兜底：单 IP 挂满一个机群也够用
 		sessionKey: sessionKey,
 		broker:     newSSEBroker(),
 	}
@@ -120,5 +121,5 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/attachments/{id}", s.requireAdmin(s.handleAdminGetAttachment))
 	mux.HandleFunc("POST /api/assignments/{id}/requeue", s.requireAdmin(s.handleRequeueAssignment))
 	mux.Handle("GET /", http.FileServerFS(static))
-	return securityHeaders(mux)
+	return s.securityHeaders(mux)
 }

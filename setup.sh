@@ -87,13 +87,35 @@ if [ -s "$CFG" ]; then
   say "== 已存在配置，跳过注册"
 else
   [ -n "$AM_TOKEN" ] || die "缺少 AM_TOKEN（一次性注册令牌）"
-  META_FIELD=""
-  if [ -n "$META" ] && [ "$META" != "{}" ]; then
-    META_FIELD=$(python3 -c 'import json,sys; print(",\"meta\":" + json.dumps(sys.argv[1], ensure_ascii=False))' "$META")
+  # 注册 JSON 统一交给 python3 组装：名称/主机名里的引号、反斜杠、控制字符
+  # 都会被正确转义，杜绝手工拼串的 JSON 注入与语法错误；无 python3 时退化为
+  # sed 转义（只处理引号与反斜杠，控制字符由服务端剔除）。
+  if command -v python3 >/dev/null 2>&1; then
+    BODY=$(AM_TOKEN="$AM_TOKEN" AM_NAME="$AM_NAME" AM_HOST="$(hostname 2>/dev/null || echo unknown)" \
+      AM_OS="$(uname -s)" AM_ARCH="$(uname -m)" AM_META="$META" python3 - <<'PYREG'
+import json, os
+d = {
+    "token": os.environ["AM_TOKEN"],
+    "name": os.environ["AM_NAME"],
+    "hostname": os.environ["AM_HOST"],
+    "os": os.environ["AM_OS"],
+    "arch": os.environ["AM_ARCH"],
+}
+meta = os.environ.get("AM_META", "")
+if meta and meta != "{}":
+    d["meta"] = meta
+print(json.dumps(d, ensure_ascii=False))
+PYREG
+)
+  else
+    esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    META_FIELD_RAW=""
+    if [ -n "$META" ] && [ "$META" != "{}" ]; then META_FIELD_RAW=",\"meta\":$META"; fi
+    BODY="{\"token\":\"$(esc "$AM_TOKEN")\",\"name\":\"$(esc "$AM_NAME")\",\"hostname\":\"$(esc "$(hostname 2>/dev/null || echo unknown)")\",\"os\":\"$(esc "$(uname -s)")\",\"arch\":\"$(esc "$(uname -m)")\"$META_FIELD_RAW}"
   fi
   # 不用 -f：HTTP 错误时保留响应体并原样透出，便于区分 401（令牌失效）与 409（名称占用）
   resp=$(curl -sS -m 20 -X POST "$AM_URL/api/register" -H 'Content-Type: application/json' \
-    -d "{\"token\":\"$AM_TOKEN\",\"name\":\"$AM_NAME\",\"hostname\":\"$(hostname)\",\"os\":\"$(uname -s)\",\"arch\":\"$(uname -m)\"$META_FIELD}") \
+    -d "$BODY") \
     || die "注册请求失败（网络错误）"
   HB=$(printf '%s' "$resp" | sed -n 's/.*"heartbeat_token":"\([^"]*\)".*/\1/p')
   [ -n "$HB" ] || die "注册被拒：$resp（401=令牌失效，向我索要新令牌；409=名称已占用，换 AM_NAME 重跑，令牌仍有效）"
@@ -115,7 +137,7 @@ if [ -z "$RUN_TASK" ]; then
   esac
 fi
 case "$RUN_TASK" in *"'"*) die "AM_RUN_TASK 不能包含单引号";; esac
-printf 'AM_URL=%s\nAM_HB_TOKEN=%s\nAM_INSTANCE=%s\nAM_RUN_TASK=%s\n' "$AM_URL" "$AM_HB_TOKEN" "$AM_INSTANCE" "'$RUN_TASK'" > "$CFG"
+printf "AM_URL='%s'\nAM_HB_TOKEN='%s'\nAM_INSTANCE='%s'\nAM_RUN_TASK=%s\n" "$AM_URL" "$AM_HB_TOKEN" "$AM_INSTANCE" "'$RUN_TASK'" > "$CFG"
 chmod 600 "$CFG"
 say "== 执行器: $RUN_TASK"
 
@@ -181,7 +203,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     rm -f "$plist"
   done
 elif command -v crontab >/dev/null 2>&1; then
-  crontab -l 2>/dev/null | grep -v "$DIR/" | crontab - 2>/dev/null
+  crontab -l 2>/dev/null | grep -F -v "$DIR/" | crontab - 2>/dev/null
 elif command -v systemctl >/dev/null 2>&1; then
   for unit in heartbeat task-runner; do
     systemctl --user disable --now "agent-matrix$SFX-$unit.timer" 2>/dev/null
@@ -460,7 +482,7 @@ exit 99
 EOF
 mv -f "$DIR/.openclaw-round.sh.tmp" "$DIR/openclaw-round.sh"
 
-chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh" "$DIR/openclaw-round.sh" "$DIR/install-scheduler.sh"
+chmod +x "$DIR/heartbeat.sh" "$DIR/task-runner.sh" "$DIR/hermes-round.sh" "$DIR/openclaw-round.sh"
 command -v python3 >/dev/null 2>&1 || say "== 警告: 未找到 python3，task-runner 整体依赖它"
 
 # ---- 6) 定时任务安装器（生成到实例目录，setup 与心跳间隔跟进共用） ----
@@ -508,7 +530,7 @@ PLIST
 elif command -v crontab >/dev/null 2>&1; then
   MINS=$((SECS / 60))
   if [ "$MINS" -le 1 ]; then EXP='* * * * *'; else EXP="*/$MINS * * * *"; fi
-  ( crontab -l 2>/dev/null | grep -v "$DIR/"
+  ( crontab -l 2>/dev/null | grep -F -v "$DIR/"
     printf '%s %s\n%s %s\n' "$EXP" "$DIR/heartbeat.sh" "$EXP" "$DIR/task-runner.sh" ) | crontab -
   SCHED="cron"
 elif command -v systemctl >/dev/null 2>&1; then
@@ -538,6 +560,7 @@ fi
 echo "$SCHED"
 EOSCHED
 mv -f "$DIR/.install-scheduler.sh.tmp" "$DIR/install-scheduler.sh"
+chmod +x "$DIR/install-scheduler.sh"
 
 # ---- 7) 安装定时任务：初始间隔取 AM_INTERVAL（默认 60s），随后心跳自动跟进服务端全局设置 ----
 SECS="${AM_INTERVAL:-60}"

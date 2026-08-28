@@ -86,9 +86,20 @@ func verifyPassword(pw, encoded string) bool {
 
 // ---- 管理端会话（无状态 HMAC Cookie，密钥持久化在 settings 表） ----
 
+// sessionEpoch 返回当前会话纪元。纪元参与会话签名：logout 时递增即可让
+// 全部已签发 Cookie 立即失效（单管理员场景等价于全端登出），弥补无状态
+// Cookie 无法撤销的缺陷——否则 Cookie 一旦泄露，7 天内无法止损。
+func (s *server) sessionEpoch() int64 {
+	e, err := s.store.sessionEpoch()
+	if err != nil {
+		return 0 // 读取失败退回 0：仅影响撤销及时性，不影响登录主链路
+	}
+	return e
+}
+
 func (s *server) sessionValue(exp int64) string {
 	mac := hmac.New(sha256.New, []byte(s.sessionKey))
-	mac.Write([]byte(strconv.FormatInt(exp, 10)))
+	fmt.Fprintf(mac, "%d.%d", s.sessionEpoch(), exp)
 	return fmt.Sprintf("%d.%s", exp, hex.EncodeToString(mac.Sum(nil)))
 }
 
