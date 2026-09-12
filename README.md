@@ -433,9 +433,26 @@ Agent Matrix 做**注册表 + 在线状态 + 任务直达（文本与附件）**
 
 ---
 
+## 🧩 Hank 的 AI 工具矩阵
+
+Agent Matrix 是 Hank 个人 / 小团队工作流中**Agent 调度与协作**这一环。完整矩阵：
+
+| 项目 | 角色 | 状态 |
+|---|---|---|
+| 🎬 [**video-studio**](https://github.com/HankGuo/video-studio) | AI 视频创作工作流 | v0.2.x · 持续迭代 |
+| 🧠 **agent-matrix**（本仓库） | Agent 注册与派单 | v0.x · 内测中 |
+| 🤝 [**open-meetup**](https://github.com/HankGuo/open-meetup) | 实时协作与分享 | v0.x · 稳定 |
+| 🌐 [**webppt**](https://github.com/HankGuo/webppt) | 内容展示与沉淀 | 在线运行 |
+
+> 公众号「**算力白肉**」会同步更新实战案例与产品决策记录。
+
+---
+
 ## 📄 License
 
-[Apache License 2.0](LICENSE)：任何人可**免费**使用、修改、再发布，包括商业用途；条件是保留版权与 [NOTICE](NOTICE) 署名、声明你所做的修改，并遵守其中的专利条款。如需在**不保留署名**的条件下商业使用，请联系作者获取商业授权（GitHub: [@HankGuo](https://github.com/HankGuo)）。
+本项目以 [Apache License 2.0](LICENSE) 开源：任何人可**免费**使用、修改、再发布，包括商业用途；条件是保留版权与 [NOTICE](NOTICE) 署名、声明你所做的修改，并遵守其中的专利条款。
+
+**如需在不保留署名的条件下商业使用**（如 SaaS 集成、私有化交付等），请联系作者获取商业授权：GitHub [@HankGuo](https://github.com/HankGuo) 或 `superai@agent.qq.com`。
 
 ---
 
