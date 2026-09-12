@@ -1,6 +1,6 @@
 # Agent Matrix
 
-[![Go](https://img.shields.io/badge/Go-1.26%2B-blue?logo=go)](https://go.dev/dl/) [![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE) [![Release](https://img.shields.io/github/v/release/HankGuo/agent-matrix)](https://github.com/HankGuo/agent-matrix/releases) [![Stars](https://img.shields.io/github/stars/HankGuo/agent-matrix?style=social)](https://github.com/HankGuo/agent-matrix)
+[![Go](https://img.shields.io/badge/Go-1.26%2B-blue?logo=go)](https://go.dev/dl/) [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE) [![Release](https://img.shields.io/github/v/release/HankGuo/agent-matrix)](https://github.com/HankGuo/agent-matrix/releases) [![Stars](https://img.shields.io/github/stars/HankGuo/agent-matrix?style=social)](https://github.com/HankGuo/agent-matrix)
 
 [English](README.en.md)
 
@@ -450,9 +450,9 @@ Agent Matrix 是 Hank 个人 / 小团队工作流中**Agent 调度与协作**这
 
 ## 📄 License
 
-本项目以 [Apache License 2.0](LICENSE) 开源：任何人可**免费**使用、修改、再发布，包括商业用途；条件是保留版权与 [NOTICE](NOTICE) 署名、声明你所做的修改，并遵守其中的专利条款。
+本项目以 [MIT License](LICENSE) 开源。
 
-**如需在不保留署名的条件下商业使用**（如 SaaS 集成、私有化交付等），请联系作者获取商业授权：GitHub [@HankGuo](https://github.com/HankGuo) 或 `superai@agent.qq.com`。
+**商业使用完全自由**，保留版权与许可声明即可。如需定制开发、长期支持、API 接入、商务合作，请联系：`superai@agent.qq.com`
 
 ---
 
